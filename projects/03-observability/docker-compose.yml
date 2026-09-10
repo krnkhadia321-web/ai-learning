@@ -1,0 +1,23 @@
+# Jaeger — a trace collector and UI in one container.
+#
+# Chosen deliberately for an 8 GB machine. The obvious alternative (self-hosted
+# Langfuse) now needs Postgres + ClickHouse + Redis + object storage, which would
+# eat your entire WSL2 budget. Jaeger all-in-one is a single process with in-memory
+# storage: no database, no volumes, nothing to clean up. Stop it and the traces are
+# gone — which is exactly right for a learning environment.
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: ai-learning-jaeger
+    ports:
+      - '16686:16686' # Web UI          → http://localhost:16686
+      - '4318:4318' #   OTLP over HTTP  ← our app exports here
+    environment:
+      COLLECTOR_OTLP_ENABLED: 'true'
+      # Bound the in-memory trace store. Without this it grows until the container
+      # is OOM-killed — which on a 8 GB laptop takes your editor down with it.
+      MEMORY_MAX_TRACES: '5000'
+    # Hard ceiling as a second line of defence.
+    mem_limit: 512m
+    restart: unless-stopped

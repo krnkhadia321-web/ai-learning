@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Observability — test bench</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.55 ui-sans-serif, system-ui, sans-serif; max-width: 900px;
+         margin: 34px auto; padding: 0 20px; }
+  h1 { font-size: 19px; margin-bottom: 2px; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .06em;
+       color: #888; margin: 26px 0 8px; }
+  p.sub { color: #888; margin-top: 0; }
+  .row { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; align-items: center; }
+  input, select, button { font: inherit; padding: 8px 10px; border-radius: 6px;
+         border: 1px solid #8884; background: transparent; color: inherit; }
+  input { flex: 1; min-width: 260px; }
+  button { cursor: pointer; }
+  button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  .ex { font-size: 13px; color: #2563eb; cursor: pointer; text-decoration: underline;
+        background: none; border: none; padding: 2px 0; display: block; text-align: left; }
+  .step { border-left: 3px solid #8884; padding: 6px 0 6px 12px; margin: 8px 0; }
+  .step .k { font: 11px ui-monospace, monospace; text-transform: uppercase;
+             letter-spacing: .06em; color: #888; }
+  .step.tool_result { border-left-color: #16a34a; }
+  .step.tool_error, .step.error { border-left-color: #dc2626; }
+  .step.approval_required { border-left-color: #d97706; }
+  .step.answer { border-left-color: #2563eb; }
+  pre { background: #8881; padding: 9px; border-radius: 6px; overflow-x: auto;
+        font: 12.5px ui-monospace, monospace; margin: 6px 0 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #8883; }
+  th { font: 11px ui-monospace, monospace; text-transform: uppercase;
+       letter-spacing: .05em; color: #888; font-weight: 400; }
+  td.n { text-align: right; font: 12.5px ui-monospace, monospace; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+           gap: 10px; margin-top: 8px; }
+  .card { border: 1px solid #8883; border-radius: 8px; padding: 10px 12px; }
+  .card .v { font: 600 19px ui-monospace, monospace; }
+  .card .l { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #888; }
+  .note { font-size: 13px; color: #888; }
+  a { color: #2563eb; }
+</style>
+</head>
+<body>
+  <h1>Observability</h1>
+  <p class="sub">Cost, tokens, and what the model actually did — per request.</p>
+
+  <div class="row">
+    <input id="q" value="Where is my order A-1001, and how many days until it arrives?">
+    <select id="user">
+      <option value="u_1">u_1</option>
+      <option value="u_2">u_2</option>
+    </select>
+    <button class="primary" id="ask">Ask</button>
+  </div>
+
+  <div>
+    <button class="ex" data-q="Where is my order A-1001, and how many days until it arrives?">Multi-step — 3 model calls, 2 tools</button>
+    <button class="ex" data-q="What is the capital of France?">Single call — compare the cost</button>
+    <button class="ex" data-q="How many days until my order A-1001 arrives?">Date question — did it call the clock tool?</button>
+    <button class="ex" data-q="My email is test@example.com and my card is 4111 1111 1111 1111 — where is order A-1002?">Redaction — check the span content</button>
+  </div>
+
+  <div id="trace" class="note"></div>
+  <div id="steps"></div>
+
+  <h2>This request</h2>
+  <div class="cards" id="cards"></div>
+
+  <h2>Ledger — all requests since start</h2>
+  <div class="row">
+    <button id="refresh">Refresh</button>
+    <button id="reset">Reset ledger</button>
+  </div>
+  <div id="usage"></div>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+const usd = (n) => '$' + Number(n ?? 0).toFixed(6);
+
+document.querySelectorAll('.ex').forEach((b) => {
+  b.onclick = () => { $('q').value = b.dataset.q; $('ask').click(); };
+});
+
+async function* sse(res) {
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buffer += value;
+    let b;
+    while ((b = buffer.indexOf('\n\n')) !== -1) {
+      const frame = buffer.slice(0, b); buffer = buffer.slice(b + 2);
+      let ev = 'message', data = '';
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event:')) ev = line.slice(6).trim();
+        else if (line.startsWith('data:')) data += line.slice(5).trimStart();
+      }
+      if (data) yield [ev, JSON.parse(data)];
+    }
+  }
+}
+
+$('ask').onclick = async () => {
+  $('steps').innerHTML = ''; $('cards').innerHTML = ''; $('trace').innerHTML = '';
+  $('ask').disabled = true;
+  const t0 = performance.now();
+  try {
+    const res = await fetch('/v1/agent', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: $('q').value, userId: $('user').value }),
+    });
+    for await (const [ev, d] of sse(res)) {
+      if (ev === 'trace') {
+        // An all-zero trace ID means the OTel SDK never started, so every span is a
+        // no-op. Worth surfacing plainly — otherwise you sit staring at an empty
+        // Jaeger UI wondering why nothing arrives.
+        $('trace').innerHTML = /^0+$/.test(d.traceId)
+          ? `<span class="note">tracing disabled — trace ID is all zeros. Start Jaeger
+             (<code>npm run jaeger:up</code>), set <code>OTEL_ENABLED=true</code> in .env, restart.</span>`
+          : `trace <code>${esc(d.traceId)}</code> — <a href="${d.jaeger}" target="_blank">open in Jaeger →</a>`;
+        continue;
+      }
+      const el = document.createElement('div');
+      el.className = `step ${ev}`;
+      if (ev === 'thinking') el.innerHTML = `<div class="k">iteration ${d.iteration} — model call</div>`;
+      else if (ev === 'tool_result') el.innerHTML =
+        `<div class="k">tool ran → ${esc(d.name)}</div><pre>${esc(JSON.stringify(d.output))}</pre>`;
+      else if (ev === 'tool_error') el.innerHTML =
+        `<div class="k">tool rejected → ${esc(d.name)}</div><pre>${esc(d.error)}</pre>`;
+      else if (ev === 'approval_required') el.innerHTML =
+        `<div class="k">⚠ approval required → ${esc(d.name)}</div><pre>NOT executed.</pre>`;
+      else if (ev === 'error') el.innerHTML = `<div class="k">error</div><div>${esc(d.message)}</div>`;
+      else if (ev === 'answer') {
+        el.innerHTML = `<div class="k">final answer</div><div>${esc(d.text)}</div>`;
+        const toolList = d.toolsUsed?.length ? d.toolsUsed.join(', ') : '⚠ none';
+        $('cards').innerHTML = `
+          <div class="card"><div class="l">cost</div><div class="v">${usd(d.costUsd)}</div></div>
+          <div class="card"><div class="l">tokens</div><div class="v">${d.totalTokens}</div></div>
+          <div class="card"><div class="l">model calls</div><div class="v">${d.iterations}</div></div>
+          <div class="card"><div class="l">wall time</div><div class="v">${Math.round(performance.now()-t0)}ms</div></div>
+          <div class="card" style="grid-column:1/-1"><div class="l">tools actually used</div><div class="v" style="font-size:14px">${esc(toolList)}</div></div>`;
+      }
+      $('steps').appendChild(el);
+    }
+    loadUsage();
+  } finally { $('ask').disabled = false; }
+};
+
+async function loadUsage() {
+  const u = await (await fetch('/v1/usage')).json();
+  const rows = (obj) => Object.entries(obj).map(([k, v]) =>
+    `<tr><td>${esc(k)}</td><td class="n">${v.calls}</td><td class="n">${v.inputTokens}</td>
+     <td class="n">${v.outputTokens}</td><td class="n">${usd(v.usd)}</td></tr>`).join('') ||
+    '<tr><td colspan="5" class="note">no calls yet</td></tr>';
+
+  $('usage').innerHTML = `
+    <div class="cards">
+      <div class="card"><div class="l">total spend</div><div class="v">${usd(u.total.usd)}</div></div>
+      <div class="card"><div class="l">model calls</div><div class="v">${u.total.calls}</div></div>
+      <div class="card"><div class="l">input tokens</div><div class="v">${u.total.inputTokens}</div></div>
+      <div class="card"><div class="l">output tokens</div><div class="v">${u.total.outputTokens}</div></div>
+      <div class="card"><div class="l">output % of cost</div><div class="v">${Math.round((u.outputShareOfCost||0)*100)}%</div></div>
+    </div>
+    <h2>By model</h2><table><tr><th>model</th><th>calls</th><th>in</th><th>out</th><th>cost</th></tr>${rows(u.byModel)}</table>
+    <h2>By user</h2><table><tr><th>user</th><th>calls</th><th>in</th><th>out</th><th>cost</th></tr>${rows(u.byUser)}</table>
+    <h2>By operation</h2><table><tr><th>operation</th><th>calls</th><th>in</th><th>out</th><th>cost</th></tr>${rows(u.byOperation)}</table>`;
+}
+
+$('refresh').onclick = loadUsage;
+$('reset').onclick = async () => { await fetch('/v1/usage/reset', { method: 'POST' }); loadUsage(); };
+loadUsage();
+</script>
+</body>
+</html>

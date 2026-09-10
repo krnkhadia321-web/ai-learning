@@ -1,0 +1,21 @@
+{
+  "name": "03-observability",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Tracing, token accounting and cost attribution for LLM calls — seeing inside a nondeterministic system.",
+  "scripts": {
+    "dev": "node --env-file=../../.env --watch src/server.js",
+    "start": "node --env-file=../../.env src/server.js",
+    "jaeger:up": "docker compose up -d",
+    "jaeger:down": "docker compose down"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
+    "@opentelemetry/resources": "^2.11.0",
+    "@opentelemetry/sdk-node": "^0.222.0",
+    "@opentelemetry/semantic-conventions": "^1.43.0",
+    "zod": "^3.25.76"
+  }
+}
