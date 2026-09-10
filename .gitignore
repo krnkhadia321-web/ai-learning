@@ -17,3 +17,7 @@ Thumbs.db
 # Personal practice files — self-test questions and answer keys stay local.
 # A pattern with no slash matches at any depth, so this covers every project folder.
 PRACTICE.md
+
+# Resume drafts stay local too. A public repo containing your own resume wording
+# reads as optimising for appearances rather than building.
+RESUME.md
