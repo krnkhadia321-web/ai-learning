@@ -1,0 +1,11 @@
+{
+  "name": "01-streaming-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "An SSE gateway in front of an LLM: streaming, cancellation, timeouts, retry-before-first-byte.",
+  "scripts": {
+    "dev": "node --env-file=../../.env --watch src/server.js",
+    "start": "node --env-file=../../.env src/server.js"
+  }
+}

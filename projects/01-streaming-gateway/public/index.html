@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Streaming Gateway — test bench</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.55 ui-sans-serif, system-ui, sans-serif; max-width: 780px;
+         margin: 40px auto; padding: 0 20px; }
+  h1 { font-size: 19px; margin-bottom: 4px; }
+  p.sub { color: #888; margin-top: 0; }
+  .row { display: flex; gap: 8px; margin: 14px 0; flex-wrap: wrap; }
+  input, select, button { font: inherit; padding: 7px 10px; border-radius: 6px;
+         border: 1px solid #8884; background: transparent; color: inherit; }
+  input { flex: 1; min-width: 220px; }
+  button { cursor: pointer; }
+  button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  #out { white-space: pre-wrap; border: 1px solid #8884; border-radius: 8px;
+         padding: 14px; min-height: 120px; }
+  #stats { font: 12px ui-monospace, monospace; color: #888; margin-top: 10px; }
+  .err { color: #dc2626; }
+  .hint { font-size: 13px; color: #888; }
+  code { background: #8882; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>Streaming gateway — test bench</h1>
+  <p class="sub">Watch tokens arrive one frame at a time.</p>
+
+  <div class="row">
+    <select id="provider">
+      <option value="mock">mock (no key)</option>
+      <option value="groq">groq</option>
+      <option value="google">google</option>
+    </select>
+    <input id="prompt" value="Explain what backpressure means, in two sentences.">
+  </div>
+  <div class="row">
+    <button class="primary" id="go">Send</button>
+    <button id="stop" disabled>Stop</button>
+  </div>
+
+  <p class="hint">
+    With <code>mock</code>, put <code>slow</code>, <code>fail</code>, or <code>hang</code>
+    in the prompt to trigger the throttled, retry, and idle-watchdog paths.
+    Press <b>Stop</b> mid-stream and watch the server log the abort.
+  </p>
+
+  <div id="out"></div>
+  <div id="stats"></div>
+
+<script type="module">
+// NOTE: we use fetch + ReadableStream, NOT the browser's built-in EventSource.
+// EventSource can only issue GET requests with no custom headers or body — useless
+// for sending a chat payload or an Authorization header. Every real LLM frontend
+// hits this wall, so streaming over fetch is the standard approach.
+
+const $ = (id) => document.getElementById(id);
+let controller = null;
+
+$('go').onclick = async () => {
+  const out = $('out'), stats = $('stats');
+  out.textContent = ''; stats.textContent = 'connecting…';
+  $('go').disabled = true; $('stop').disabled = false;
+
+  // The browser-side AbortController. Aborting closes the TCP connection, which
+  // fires `res.on('close')` on the server, which aborts ITS controller, which
+  // cancels the upstream provider call. That whole chain is the point of project 1.
+  controller = new AbortController();
+
+  try {
+    const res = await fetch('/v1/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: $('provider').value,
+        messages: [{ role: 'user', content: $('prompt').value }],
+      }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      out.innerHTML = `<span class="err">HTTP ${res.status}: ${await res.text()}</span>`;
+      return;
+    }
+
+    // Same buffering discipline as the server: accumulate, split on the blank-line
+    // frame boundary, never assume a chunk is a whole frame.
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+
+      let boundary;
+      while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+
+        let event = 'message', data = '';
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) data += line.slice(5).trimStart();
+          // lines starting with ':' are heartbeat comments — ignore
+        }
+        if (!data) continue;
+        const payload = JSON.parse(data);
+
+        if (event === 'start')  stats.textContent = `TTFT ${payload.ttftMs}ms · ${payload.provider} · attempt ${payload.attempt}`;
+        if (event === 'delta')  out.textContent += payload.text;
+        if (event === 'done')   stats.textContent = `${payload.tokens} chunks · TTFT ${payload.ttftMs}ms · total ${payload.totalMs}ms`;
+        if (event === 'error')  out.innerHTML += `<span class="err">\n\n[${payload.type}] ${payload.message}</span>`;
+      }
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') stats.textContent = 'aborted by client';
+    else out.innerHTML += `<span class="err">${err.message}</span>`;
+  } finally {
+    $('go').disabled = false; $('stop').disabled = true; controller = null;
+  }
+};
+
+$('stop').onclick = () => controller?.abort();
+</script>
+</body>
+</html>
