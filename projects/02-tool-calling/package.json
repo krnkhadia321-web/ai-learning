@@ -1,0 +1,14 @@
+{
+  "name": "02-tool-calling",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Structured outputs and tool calling: making an LLM return machine-readable data and ask your code to do things.",
+  "scripts": {
+    "dev": "node --env-file=../../.env --watch src/server.js",
+    "start": "node --env-file=../../.env src/server.js"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  }
+}

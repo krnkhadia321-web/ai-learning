@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tool calling — test bench</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.55 ui-sans-serif, system-ui, sans-serif; max-width: 860px;
+         margin: 36px auto; padding: 0 20px; }
+  h1 { font-size: 19px; margin-bottom: 2px; }
+  p.sub { color: #888; margin-top: 0; }
+  .tabs { display: flex; gap: 6px; margin: 18px 0 14px; border-bottom: 1px solid #8883; }
+  .tab { padding: 8px 14px; cursor: pointer; border: none; background: none;
+         color: inherit; font: inherit; border-bottom: 2px solid transparent; }
+  .tab.on { border-bottom-color: #2563eb; font-weight: 600; }
+  .row { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
+  input, select, textarea, button { font: inherit; padding: 8px 10px; border-radius: 6px;
+         border: 1px solid #8884; background: transparent; color: inherit; }
+  input { flex: 1; min-width: 260px; }
+  textarea { width: 100%; min-height: 130px; font: 13px ui-monospace, monospace; }
+  button { cursor: pointer; }
+  button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  .ex { font-size: 13px; color: #2563eb; cursor: pointer; text-decoration: underline;
+        background: none; border: none; padding: 2px 0; display: block; text-align: left; }
+  .step { border-left: 3px solid #8884; padding: 7px 0 7px 12px; margin: 9px 0; }
+  .step .k { font: 11px ui-monospace, monospace; text-transform: uppercase;
+             letter-spacing: .06em; color: #888; }
+  .step.tool_result  { border-left-color: #16a34a; }
+  .step.tool_error   { border-left-color: #dc2626; }
+  .step.approval_required { border-left-color: #d97706; }
+  .step.answer       { border-left-color: #2563eb; }
+  .step.error        { border-left-color: #dc2626; }
+  pre { background: #8881; padding: 10px; border-radius: 6px; overflow-x: auto;
+        font: 12.5px ui-monospace, monospace; margin: 6px 0 0; }
+  .hide { display: none; }
+  .meta { font: 12px ui-monospace, monospace; color: #888; margin-top: 12px; }
+</style>
+</head>
+<body>
+  <h1>Tool calling &amp; structured outputs</h1>
+  <p class="sub">Watch the model ask your code to do things — and watch you decide.</p>
+
+  <div class="tabs">
+    <button class="tab on" data-p="agent">Agent loop</button>
+    <button class="tab" data-p="extract">Structured extraction</button>
+  </div>
+
+  <!-- ── AGENT ─────────────────────────────────────────────────────────────── -->
+  <section id="p-agent">
+    <div class="row">
+      <input id="q" value="Where is my order A-1001, and how many days until it arrives?">
+      <select id="user">
+        <option value="u_1">as u_1 (owns A-1001, A-1002)</option>
+        <option value="u_2">as u_2 (owns A-2007)</option>
+      </select>
+    </div>
+    <div class="row"><button class="primary" id="ask">Ask</button></div>
+
+    <div>
+      <button class="ex" data-q="Where is my order A-1001, and how many days until it arrives?">Two tools, chained — needs the order AND the current date</button>
+      <button class="ex" data-q="Show me order A-2007">Authorization — u_1 asking for u_2's order</button>
+      <button class="ex" data-q="Find me desk accessories under 3000 rupees">Structured arguments with an optional field</button>
+      <button class="ex" data-q="Please cancel order A-1002">Destructive action — stops for approval</button>
+      <button class="ex" data-q="Look up order 99">Bad arguments — result depends on the model (see NOTES.md §7)</button>
+      <button class="ex" data-q="What is the capital of France?">No tool needed — model answers directly</button>
+    </div>
+
+    <div id="steps"></div>
+    <div class="meta" id="ameta"></div>
+  </section>
+
+  <!-- ── EXTRACT ───────────────────────────────────────────────────────────── -->
+  <section id="p-extract" class="hide">
+    <textarea id="email">Hi, I ordered a keyboard three weeks ago (order A-1001) and it STILL hasn't arrived. I've emailed twice with no reply. This is completely unacceptable — I want a full refund today or I'm disputing the charge with my bank.</textarea>
+    <div class="row"><button class="primary" id="ext">Extract</button></div>
+    <div id="eout"></div>
+    <div class="meta" id="emeta"></div>
+  </section>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+
+document.querySelectorAll('.tab').forEach((t) => {
+  t.onclick = () => {
+    document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('on', x === t));
+    $('p-agent').classList.toggle('hide', t.dataset.p !== 'agent');
+    $('p-extract').classList.toggle('hide', t.dataset.p !== 'extract');
+  };
+});
+
+document.querySelectorAll('.ex').forEach((b) => {
+  b.onclick = () => { $('q').value = b.dataset.q; $('ask').click(); };
+});
+
+// Same SSE parsing discipline as project 01: buffer, split on the blank line, never
+// assume a network chunk is a whole frame.
+async function* sse(res) {
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buffer += value;
+    let b;
+    while ((b = buffer.indexOf('\n\n')) !== -1) {
+      const frame = buffer.slice(0, b); buffer = buffer.slice(b + 2);
+      let ev = 'message', data = '';
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event:')) ev = line.slice(6).trim();
+        else if (line.startsWith('data:')) data += line.slice(5).trimStart();
+      }
+      if (data) yield [ev, JSON.parse(data)];
+    }
+  }
+}
+
+$('ask').onclick = async () => {
+  const steps = $('steps'); steps.innerHTML = ''; $('ameta').textContent = '';
+  $('ask').disabled = true;
+  const t0 = performance.now();
+
+  try {
+    const res = await fetch('/v1/agent', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: $('q').value, userId: $('user').value }),
+    });
+
+    for await (const [ev, d] of sse(res)) {
+      const el = document.createElement('div');
+      el.className = `step ${ev}`;
+      if (ev === 'thinking') {
+        el.innerHTML = `<div class="k">iteration ${d.iteration} — asking the model</div>`;
+      } else if (ev === 'tool_result') {
+        el.innerHTML = `<div class="k">tool ran → ${esc(d.name)}</div>
+          <pre>args:   ${esc(JSON.stringify(d.args))}
+result: ${esc(JSON.stringify(d.output))}</pre>`;
+      } else if (ev === 'tool_error') {
+        el.innerHTML = `<div class="k">tool rejected → ${esc(d.name)}</div>
+          <pre>${esc(d.error)}${d.args ? '\nargs: ' + esc(JSON.stringify(d.args)) : ''}</pre>`;
+      } else if (ev === 'approval_required') {
+        el.innerHTML = `<div class="k">⚠ human approval required → ${esc(d.name)}</div>
+          <pre>${esc(JSON.stringify(d.args))}\n\nNOT executed.</pre>`;
+      } else if (ev === 'answer') {
+        el.innerHTML = `<div class="k">final answer</div><div>${esc(d.text)}</div>`;
+        $('ameta').textContent =
+          `${d.iterations} iteration(s) · ${d.totalTokens} tokens · ${Math.round(performance.now() - t0)}ms`;
+      } else if (ev === 'error') {
+        el.innerHTML = `<div class="k">error</div><div>${esc(d.message)}</div>`;
+      }
+      steps.appendChild(el);
+    }
+  } catch (err) {
+    steps.innerHTML += `<div class="step error">${esc(err.message)}</div>`;
+  } finally { $('ask').disabled = false; }
+};
+
+$('ext').onclick = async () => {
+  $('eout').innerHTML = '<div class="step">extracting…</div>'; $('emeta').textContent = '';
+  $('ext').disabled = true;
+  try {
+    const res = await fetch('/v1/extract', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: $('email').value }),
+    });
+    const d = await res.json();
+    if (d.ticket) {
+      $('eout').innerHTML = `<div class="step answer"><div class="k">validated ticket</div>
+        <pre>${esc(JSON.stringify(d.ticket, null, 2))}</pre></div>`;
+      $('emeta').textContent = `${d.attempts} attempt(s) — repair loop ran ${d.attempts - 1} time(s)`;
+    } else {
+      $('eout').innerHTML = `<div class="step error"><div class="k">failed</div>
+        <pre>${esc(d.error)}</pre></div>`;
+    }
+    if (d.trace?.length) {
+      $('eout').innerHTML += `<div class="step"><div class="k">trace</div>
+        <pre>${esc(JSON.stringify(d.trace, null, 2))}</pre></div>`;
+    }
+  } finally { $('ext').disabled = false; }
+};
+</script>
+</body>
+</html>
