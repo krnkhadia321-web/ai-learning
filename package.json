@@ -1,0 +1,16 @@
+{
+  "name": "ai-learning",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Backend-engineer path into production AI systems. Each project teaches one skill; the capstone assembles them.",
+  "workspaces": [
+    "projects/*"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "01": "npm run dev --workspace=01-streaming-gateway"
+  }
+}

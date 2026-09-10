@@ -1,0 +1,19 @@
+node_modules/
+.env
+.env.local
+*.log
+logs/
+
+# Local container state (Postgres/Redis volumes) — never commit data dirs
+.data/
+docker-data/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Personal practice files — self-test questions and answer keys stay local.
+# A pattern with no slash matches at any depth, so this covers every project folder.
+PRACTICE.md
