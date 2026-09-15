@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Semantic cache — test bench</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.55 ui-sans-serif, system-ui, sans-serif; max-width: 900px;
+         margin: 34px auto; padding: 0 20px; }
+  h1 { font-size: 19px; margin-bottom: 2px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+       color: #888; margin: 24px 0 8px; font-weight: 600; }
+  p.sub { color: #888; margin-top: 0; }
+  .tabs { display: flex; gap: 6px; margin: 16px 0 12px; border-bottom: 1px solid #8883; }
+  .tab { padding: 8px 14px; cursor: pointer; border: none; background: none; color: inherit;
+         font: inherit; border-bottom: 2px solid transparent; }
+  .tab.on { border-bottom-color: #2563eb; font-weight: 600; }
+  .row { display: flex; gap: 8px; margin: 10px 0; flex-wrap: wrap; align-items: center; }
+  input, select, button { font: inherit; padding: 8px 10px; border-radius: 6px;
+         border: 1px solid #8884; background: transparent; color: inherit; }
+  input { flex: 1; min-width: 240px; }
+  button { cursor: pointer; }
+  button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  .ex { font-size: 13px; color: #2563eb; cursor: pointer; text-decoration: underline;
+        background: none; border: none; padding: 2px 0; display: block; text-align: left; }
+  .card { border: 1px solid #8883; border-radius: 8px; padding: 12px 14px; margin: 10px 0; }
+  .card.hit    { border-left: 4px solid #16a34a; }
+  .card.model  { border-left: 4px solid #2563eb; }
+  .card.block  { border-left: 4px solid #dc2626; background: #dc262611; }
+  .card.skip   { border-left: 4px solid #d97706; background: #d9770611; }
+  .k { font: 11px ui-monospace, monospace; text-transform: uppercase;
+       letter-spacing: .06em; color: #888; margin-bottom: 4px; }
+  pre { background: #8881; padding: 9px; border-radius: 6px; overflow-x: auto;
+        font: 12.5px ui-monospace, monospace; margin: 6px 0 0; white-space: pre-wrap; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap: 9px; }
+  .stat { border: 1px solid #8883; border-radius: 8px; padding: 9px 11px; }
+  .stat .v { font: 600 18px ui-monospace, monospace; }
+  .stat .l { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: #888; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th,td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #8883; vertical-align: top; }
+  th { font: 11px ui-monospace, monospace; text-transform: uppercase; color: #888; font-weight: 400; }
+  .bar { height: 8px; background: #8883; border-radius: 4px; overflow: hidden; margin-top: 6px; }
+  .bar > i { display: block; height: 100%; background: #16a34a; }
+  .bar > i.warn { background: #d97706; }
+  .bar > i.over { background: #dc2626; }
+  .hide { display: none; }
+  .note { font-size: 13px; color: #888; }
+  code { background: #8882; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>Semantic cache</h1>
+  <p class="sub">Answer the same question twice for free — without answering a <em>different</em> question for free.</p>
+
+  <div class="tabs">
+    <button class="tab on" data-p="ask">Cache</button>
+    <button class="tab" data-p="route">Model routing</button>
+  </div>
+
+  <!-- ── CACHE ──────────────────────────────────────────────────────────── -->
+  <section id="p-ask">
+    <div class="row">
+      <input id="q" value="What is your return policy?">
+      <select id="user"><option value="u_1">u_1</option><option value="u_2">u_2</option></select>
+      <button class="primary" id="ask">Ask</button>
+    </div>
+
+    <div>
+      <button class="ex" data-q="What is the capital of France?">1 ▸ then #2 — a genuine cache hit (0.938)</button>
+      <button class="ex" data-q="Which city is the capital of France?">2 ▸ rephrased — should HIT for $0</button>
+      <button class="ex" data-q="How many days of annual leave does a grade 5 employee get?">3 ▸ then #4 — ⭐ the identifier guard (0.933)</button>
+      <button class="ex" data-q="How many days of annual leave does a grade 7 employee get?">4 ▸ one digit different, different answer — BLOCKED</button>
+      <button class="ex" data-q="Where is my order A-1001?">5 ▸ uses a tool — never cached at all</button>
+      <button class="ex" data-q="What is your return policy?">6 ▸ then #7 — same meaning, scores only 0.508</button>
+      <button class="ex" data-q="How do I return an item?">7 ▸ MISSES — the honest cost of a safe threshold</button>
+    </div>
+
+    <div id="out"></div>
+
+    <h2>Cache stats</h2>
+    <div class="cards" id="stats"></div>
+
+    <h2>Daily budget</h2>
+    <div id="budget"></div>
+
+    <h2>What's in the cache</h2>
+    <div class="row">
+      <button id="refresh">Refresh</button>
+      <button id="clear">Clear cache</button>
+      <button id="resetBudget">Reset budget</button>
+    </div>
+    <div id="entries"></div>
+  </section>
+
+  <!-- ── ROUTING ────────────────────────────────────────────────────────── -->
+  <section id="p-route" class="hide">
+    <p class="note">Ask the same question three ways and compare what it actually costs.</p>
+    <div class="row">
+      <input id="rq" value="Summarise the trade-offs between optimistic and pessimistic locking.">
+    </div>
+    <div class="row">
+      <button class="primary" id="rAuto">Routed (cheap first)</button>
+      <button id="rCheap">Force cheap</button>
+      <button id="rStrong">Force strong</button>
+    </div>
+    <div id="rout"></div>
+    <div id="rbe" class="note"></div>
+  </section>
+
+<script type="module">
+const $ = (id)=>document.getElementById(id);
+const esc = (s)=>String(s??'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+const usd = (n)=>'$'+Number(n??0).toFixed(6);
+
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===t));
+  $('p-ask').classList.toggle('hide',t.dataset.p!=='ask');
+  $('p-route').classList.toggle('hide',t.dataset.p!=='route');
+});
+document.querySelectorAll('.ex').forEach(b=>b.onclick=()=>{ $('q').value=b.dataset.q; $('ask').click(); });
+
+$('ask').onclick = async () => {
+  $('ask').disabled = true;
+  $('out').innerHTML = '<div class="card"><div class="k">asking…</div></div>';
+  try {
+    const res = await fetch('/v1/ask',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:$('q').value,userId:$('user').value})});
+    const d = await res.json();
+
+    if (res.status === 429) {
+      $('out').innerHTML = `<div class="card block"><div class="k">budget exceeded — HTTP 429</div>
+        <div>${esc(d.error)}</div></div>`;
+    } else if (d.source === 'cache') {
+      // A hit ALWAYS shows what it matched. A cache you can't audit is a cache you
+      // can't trust — if this were ever a wrong answer, this line is what reveals it.
+      $('out').innerHTML = `<div class="card hit">
+        <div class="k">cache hit — $0.000000, no model call</div>
+        <div>${esc(d.answer)}</div>
+        <pre>similarity ${d.similarity}
+matched:   "${esc(d.matchedQuestion)}"
+latency    ${d.latencyMs}ms  (vs ~1000ms for a model call)</pre></div>`;
+    } else {
+      let html = `<div class="card model"><div class="k">model — ${usd(d.costUsd)} · ${d.tokens} tokens · ${d.latencyMs}ms</div>
+        <div>${esc(d.answer)}</div>`;
+      if (d.toolsUsed?.length) html += `<pre>tools used: ${esc(d.toolsUsed.join(', '))}</pre>`;
+      html += `</div>`;
+
+      if (d.blockedMatch) {
+        html += `<div class="card block"><div class="k">⚠ identifier guard blocked a match</div>
+          <pre>would have matched: "${esc(d.blockedMatch.question)}"
+similarity:         ${d.blockedMatch.score.toFixed(3)}   (above the threshold!)
+its identifiers:    ${esc(JSON.stringify(d.blockedMatch.identifiers))}
+
+${esc(d.blockedNote)}</pre></div>`;
+      }
+      if (d.cacheStored === false && d.cacheSkipReason) {
+        html += `<div class="card skip"><div class="k">not cached — ${esc(d.cacheSkipReason)}</div>
+          <pre>${esc(d.cacheSkipNote ?? '')}</pre></div>`;
+      }
+      $('out').innerHTML = html;
+    }
+  } finally { $('ask').disabled=false; load(); }
+};
+
+async function load(){
+  const u = $('user').value;
+  const c = await (await fetch('/v1/cache?userId='+u)).json();
+  const s = c.stats;
+  const hitRate = s.lookups ? Math.round((s.hits/s.lookups)*100) : 0;
+  $('stats').innerHTML = `
+    <div class="stat"><div class="l">hit rate</div><div class="v">${hitRate}%</div></div>
+    <div class="stat"><div class="l">hits</div><div class="v">${s.hits}</div></div>
+    <div class="stat"><div class="l">misses</div><div class="v">${s.misses}</div></div>
+    <div class="stat"><div class="l">guard blocks</div><div class="v">${s.blockedByIdentifier}</div></div>
+    <div class="stat"><div class="l">not cacheable</div><div class="v">${s.notCacheable}</div></div>
+    <div class="stat"><div class="l">threshold</div><div class="v">${s.threshold}</div></div>`;
+
+  $('entries').innerHTML = c.entries.length
+    ? `<table><tr><th>question</th><th>identifiers</th></tr>` +
+      c.entries.map(e=>`<tr><td>${esc(e.question)}</td>
+        <td><code>${esc(JSON.stringify(e.identifiers))}</code></td></tr>`).join('') + `</table>`
+    : '<p class="note">empty — nothing cached yet for this user</p>';
+
+  const b = await (await fetch('/v1/budget?userId='+u)).json();
+  if (b.enabled) {
+    const cls = b.percentUsed>=100?'over':b.percentUsed>=70?'warn':'';
+    $('budget').innerHTML = `<div class="note">${usd(b.spent)} of ${usd(b.limit)} used — ${b.percentUsed}%, resets ${b.resetsAt}</div>
+      <div class="bar"><i class="${cls}" style="width:${Math.min(100,b.percentUsed)}%"></i></div>`;
+  } else $('budget').innerHTML = '<p class="note">budget disabled — Redis not connected</p>';
+}
+
+$('refresh').onclick = load;
+$('user').onchange = load;
+$('clear').onclick = async ()=>{ await fetch('/v1/cache/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:$('user').value})}); load(); };
+$('resetBudget').onclick = async ()=>{ await fetch('/v1/budget/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:$('user').value})}); load(); };
+
+async function route(force){
+  $('rout').innerHTML = '<div class="card"><div class="k">asking…</div></div>';
+  const res = await fetch('/v1/route',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({question:$('rq').value,userId:$('user').value,force})});
+  const d = await res.json();
+  if (res.status === 429) { $('rout').innerHTML=`<div class="card block">${esc(d.error)}</div>`; return; }
+  $('rout').innerHTML = `<div class="card ${d.escalated?'skip':'model'}">
+    <div class="k">${d.escalated?'escalated — paid for BOTH calls':'answered by '+esc(d.model)} · ${usd(d.costUsd)}</div>
+    <div>${esc(d.answer)}</div>
+    <pre>${d.trail.map(t=>`${t.model.padEnd(22)} confidence=${t.confidence.padEnd(5)} ${usd(t.costUsd)}`).join('\n')}</pre></div>`;
+  if (d.breakEven) $('rbe').textContent = d.breakEven.note;
+  load();
+}
+$('rAuto').onclick = ()=>route(undefined);
+$('rCheap').onclick = ()=>route('cheap');
+$('rStrong').onclick = ()=>route('strong');
+
+load();
+</script>
+</body>
+</html>

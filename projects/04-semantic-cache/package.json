@@ -1,0 +1,17 @@
+{
+  "name": "04-semantic-cache",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Redis semantic cache, spend-based rate limiting and model routing — making the cost from project 03 smaller.",
+  "scripts": {
+    "dev": "node --env-file=../../.env --watch src/server.js",
+    "start": "node --env-file=../../.env src/server.js",
+    "redis:up": "docker compose up -d",
+    "redis:down": "docker compose down"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "redis": "^6.2.1"
+  }
+}

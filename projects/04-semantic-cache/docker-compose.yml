@@ -1,0 +1,21 @@
+# Redis — the whole infrastructure for this project.
+#
+# ~15 MB of RAM, versus Jaeger's 512 MB in project 03. You can comfortably run this
+# alongside everything else, and you'll keep it for project 05's semantic cache too.
+#
+# No volume on purpose: a cache that survives restarts would hide bugs during
+# development, and there is nothing here you'd be sad to lose.
+
+services:
+  redis:
+    image: redis:alpine
+    container_name: ai-learning-redis
+    ports:
+      - '6379:6379'
+    # An unbounded cache is a memory leak with good PR. `allkeys-lru` evicts the
+    # least recently used keys once the limit is hit, which is exactly the behaviour
+    # you want from a cache and exactly the behaviour you must NOT have from a
+    # database — worth knowing the difference before you point an app at Redis.
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru --save ""
+    mem_limit: 192m
+    restart: unless-stopped

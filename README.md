@@ -13,7 +13,7 @@ to build the loop yourself, because the mechanism is the lesson.
 | 01  | [`streaming-gateway`](projects/01-streaming-gateway) | SSE, cancellation, timeouts, retry semantics under streaming              | ✅ built |
 | 02  | [`tool-calling`](projects/02-tool-calling)           | Structured outputs, schema validation, tool loops, iteration caps         | ✅ built |
 | 03  | [`observability`](projects/03-observability)         | OTel traces for LLM calls, token/cost accounting, redaction               | ✅ built |
-| 04  | `semantic-cache`                                     | Redis vector cache, spend-based rate limiting, model routing              | planned |
+| 04  | [`semantic-cache`](projects/04-semantic-cache)       | Redis vector cache, spend-based rate limiting, model routing              | ✅ built |
 | 05  | `retrieval`                                          | pgvector, chunking, hybrid BM25+vector search, local reranking            | planned |
 | 06  | `evals`                                              | Golden datasets, LLM-as-judge, CI quality gate                            | planned |
 | 07  | `mcp-server`                                         | Model Context Protocol server, real tools, wired into a client            | planned |
@@ -49,6 +49,19 @@ were actually invoked**.
 > has no clock. It guessed, and was wrong by two days. HTTP 200, no error, plausible
 > prose. The only signal was an empty entry in `tools_used`.
 
+**04 — Semantic cache.** Cache answers by *meaning* rather than exact wording, using
+local embeddings and Redis — plus spend-based rate limiting and cheap-model-first routing.
+
+> The finding that shaped the whole project: questions that **mean the same thing** score
+> **0.51–0.94** similarity, while questions needing **completely different answers** score
+> **0.62–0.96**. The ranges overlap, and the most dangerous pair — two different order IDs
+> — scores **highest of all at 0.962**.
+>
+> **No threshold separates them.** So the cache is guarded by rules that overrule the
+> score: exact identifier matching, never caching tool-derived answers (reusing project
+> 03's tool audit), and per-user namespacing. The honest result is a **12% hit rate** —
+> low, and trustworthy.
+
 ## Per-project files
 
 Every project folder carries its own learning material:
@@ -77,6 +90,7 @@ Free API keys:
 npm run dev --workspace=01-streaming-gateway    # then http://localhost:8787
 npm run dev --workspace=02-tool-calling         # then http://localhost:8788
 npm run dev --workspace=03-observability        # then http://localhost:8789
+npm run dev --workspace=04-semantic-cache       # then http://localhost:8790  (needs Redis)
 ```
 
 Each project's `TESTING.md` walks through every feature — browser first, command line
