@@ -369,11 +369,77 @@ cache you can't trust — and a wrong hit is otherwise invisible.
 
 ## 3. The O(n) admission
 
-`lookup()` compares the query against every entry in the namespace, one Redis round trip
-each. At 500 entries that's a few milliseconds; at 500,000 it's hopeless.
+> **In Part A terms:** to find a card by *meaning*, you can't flick to a tab. You have to
+> take **every card out of the box** and hold it up against the question. With 20 cards
+> that's a few seconds. With half a million, you're there all week.
 
-Production uses an **approximate nearest neighbour index**. In Redis that's vector sets or
-RediSearch:
+That's literally what `lookup()` does:
+
+```js
+for (const id of ids) {                       // every entry in the namespace
+  const raw = await client.hGetAll(...);      // ← a round trip to Redis, per entry
+  const score = cosine(queryVec, JSON.parse(raw.embedding));
+  ...
+}
+```
+
+### Where the time actually goes
+
+People assume the maths is the slow part. It isn't — and knowing which part is slow is
+what tells you how to fix it.
+
+| Per entry | Roughly | Notes |
+|---|---|---|
+| 384 multiply-adds (`cosine`) | **~2 µs** | genuinely trivial; CPUs eat this |
+| `JSON.parse` of 384 floats | **~20 µs** | 10× the maths, and pure waste |
+| **Redis round trip** | **~150 µs** | **75× the maths — this is the bottleneck** |
+
+So the cost is dominated by *talking to Redis*, not by comparing vectors:
+
+```
+   100 entries  →  100 round trips  →   ~17 ms
+   500 entries  →  500 round trips  →   ~85 ms      ← our cap
+ 5,000 entries  →  5,000           →  ~850 ms      ← slower than the model call!
+50,000 entries  →  50,000          →    ~8.5 s     ← hopeless
+```
+
+**At 5,000 entries the cache becomes slower than the thing it exists to avoid.** That's
+the crossover, and it's much earlier than people expect.
+
+### Fixing it, in order of effort
+
+**1. Pipeline the reads** — cheapest possible win. Instead of 500 sequential round trips,
+send all 500 commands at once and read the replies together:
+
+```js
+const pipeline = client.multi();
+for (const id of ids) pipeline.hGetAll(entryKey(userId, id));
+const rows = await pipeline.exec();     // ONE round trip
+```
+
+That alone takes 500 entries from ~85 ms to ~5 ms. Same algorithm, same O(n) comparisons
+— you just stopped paying network latency 500 times.
+
+**2. Store vectors as binary, not JSON.** A `Float32Array` written as a raw buffer needs
+no parsing at all, and is 4 bytes per dimension instead of ~12 characters:
+
+```js
+Buffer.from(new Float32Array(vec).buffer)    // 1,536 bytes vs ~4,600 of JSON
+```
+
+**3. Use an index.** This is the one that changes the complexity class rather than the
+constant factor.
+
+> **In Part A terms:** instead of holding up every card, you build a **shortcut map**.
+> Cards that are similar get linked to each other, in layers — a coarse layer that lets
+> you jump between neighbourhoods, then finer layers within one. You land in roughly the
+> right area in a few hops and only compare the handful of cards there.
+>
+> It's **approximate**: occasionally the true best card is in a neighbourhood you skipped.
+> You trade a little accuracy for orders of magnitude in speed, and for a cache that's an
+> easy trade.
+
+That structure is **HNSW** — Hierarchical Navigable Small World. In Redis:
 
 ```
 FT.CREATE idx ON HASH PREFIX 1 cache:e:
@@ -382,31 +448,218 @@ FT.CREATE idx ON HASH PREFIX 1 cache:e:
 FT.SEARCH idx "*=>[KNN 5 @embedding $vec AS score]" PARAMS 2 vec <bytes>
 ```
 
-We hand-roll the loop because the arithmetic is the lesson. Project 05 uses a real index
-(pgvector HNSW) where the scale demands one.
+`KNN 5` = "give me the 5 nearest", and Redis does the search internally — no loop, no
+round trip per entry. Roughly O(log n) instead of O(n).
+
+**We hand-roll the loop because the arithmetic is the lesson.** Once you've written
+`cosine()` yourself, an index stops being magic — it's just a faster way to run the
+comparison you already understand. Project 05 uses a real index (pgvector HNSW) at a
+scale that genuinely demands one.
+
+---
 
 ## 4. Redis configuration that matters
 
 ```
---maxmemory 128mb --maxmemory-policy allkeys-lru --save ""
+redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru --save ""
 ```
 
-`allkeys-lru` evicts least-recently-used keys at the limit — correct for a cache, and
-**catastrophic for a database**. Knowing which of those two you're running is the whole
-point of the setting. `--save ""` disables persistence: nothing here is worth surviving a
-restart.
+Three settings. Each one prevents a specific, real failure.
+
+> **In Part A terms:** your index-card box sits on a shelf. The shelf is a fixed size.
+> What happens when the box is full? And do you photocopy the whole box every night?
+
+### `--maxmemory 128mb` — how big the box is
+
+Without it, Redis grows until the container (or the machine) runs out of memory and the
+OOM killer takes it. **An unbounded cache is a memory leak with good PR.**
+
+### `--maxmemory-policy allkeys-lru` — what to do when the box is full ⚠️
+
+This is the one that bites people, because **the default is wrong for a cache**:
+
+| Policy | Behaviour when full |
+|---|---|
+| **`noeviction`** ← **THE DEFAULT** | **refuses writes.** `OOM command not allowed when used memory > 'maxmemory'` |
+| `allkeys-lru` | evict least *recently* used — good general cache default |
+| `allkeys-lfu` | evict least *frequently* used — better when a small set is very hot |
+| `volatile-lru` | evict LRU, but **only keys that have a TTL** |
+| `allkeys-random` | evict at random — cheap, surprisingly not terrible |
+
+> **The landmine:** set `maxmemory` and forget the policy, and your cache silently stops
+> accepting new entries the moment it fills. Reads keep working, so it looks healthy —
+> your hit rate just quietly decays toward zero as the cached answers go stale. People
+> discover this in production.
+
+**`volatile-*` vs `allkeys-*`** matters if one Redis holds both cache entries and things
+you can't lose. `volatile-lru` only evicts keys you gave a TTL, protecting the rest. But
+the better answer is usually **separate instances** — mixing the two is how you end up
+wanting a policy that's right for both, which doesn't exist.
+
+**The distinction to actually hold on to:**
+
+```
+Cache      allkeys-lru is CORRECT.      Losing an entry = one extra model call.
+Database   allkeys-lru is CATASTROPHIC. Redis silently deletes your data.
+```
+
+Same software, opposite correct setting. **The policy encodes what you think Redis is
+for** — and being able to say that in an interview is worth more than memorising the list.
+
+You can watch it working:
+
+```bash
+docker exec -it ai-learning-redis redis-cli INFO stats | grep evicted_keys
+```
+
+### `--save ""` — don't photocopy the box every night
+
+Disables RDB snapshots. Two reasons:
+
+**1. It costs something.** Snapshotting forks the process and writes to disk. For data
+that's worthless after a restart, that's pure overhead.
+
+**2. Persistence actively hides bugs in development.** Here's the concrete one:
+
+> You change `EMBEDDING_MODEL` to a different model. The new model produces vectors that
+> mean something *different* — possibly a different number of dimensions entirely.
+>
+> With persistence on, yesterday's vectors are still in the box. Your cosine scores are
+> now comparing coordinates from two different maps, and the numbers that come out are
+> **meaningless but not obviously wrong** — just slightly worse hit rates and the odd
+> bizarre match.
+>
+> With `--save ""`, restarting gives you a clean box and the problem cannot occur.
+
+**This is a real invalidation trap**, not a hypothetical: a cached vector is only
+comparable to vectors from the *same model*. If you ever change embedding models in
+production, **every stored vector must be recomputed or discarded.**
+
+### And `mem_limit: 192m` in the compose file
+
+Belt and braces. Redis's `maxmemory` counts *your data*, not its own overhead — buffers,
+replication backlog, fragmentation. The container limit catches the rest, so a
+miscalculation can't take your editor down with it on an 8 GB machine.
+
+---
 
 ## 5. Spend-based rate limiting
 
-Key by `user:date` so the window resets at midnight and old keys expire themselves — no
-cron, no cleanup job.
+> **In Part A terms:** every customer gets a prepaid card. When it's empty, no more calls
+> to the expert today. You already know how to build this — it's rate limiting — but with
+> money in the counter instead of requests.
 
-`INCRBYFLOAT` is atomic, so concurrent requests can't lose each other's spend the way a
-read-modify-write would. The **check** is still racy (two requests can both pass before
-either records), but the accounting is never wrong, which is what matters for the next
-request.
+### The key design: `budget:{user}:{date}`
 
-Return **429**, not 403 — it's a rate limit and it resets.
+```js
+const key = (userId) => `budget:${userId}:${new Date().toISOString().slice(0,10)}`;
+//                       budget:u_1:2026-09-15
+```
+
+Putting the **date in the key** is doing more work than it looks:
+
+- The window **resets for free** at midnight — a new date means a new key, starting at 0.
+- Old keys **expire themselves** via the TTL. No cron job, no nightly "delete rows older
+  than" query, no cleanup code to forget about.
+- Yesterday's spend is still inspectable until it expires, which is handy for debugging.
+
+**This is a fixed-window counter.** Worth knowing the alternatives and why we picked it:
+
+| Approach | How | Trade-off |
+|---|---|---|
+| **Fixed window** ← ours | one counter per period | simplest; allows a burst at the boundary |
+| Sliding window | sorted set of timestamped spends, sum the last 24h | accurate, no boundary burst; more memory and more commands |
+| Token bucket | refill at a steady rate | smooth, good for sustained-rate limits; awkward for "per day" budgets |
+
+**The fixed-window flaw:** a user can spend their entire budget at 23:59 and the whole
+thing again at 00:01 — double the intended daily spend in two minutes. For a *request*
+limit that's a real problem. For a daily *cost* cap it's usually acceptable, and saying
+"we accept boundary bursts" is better than not knowing the flaw exists.
+
+### Why `INCRBYFLOAT` and not read-modify-write
+
+Here's the bug you avoid. Suppose you did it the obvious way:
+
+```js
+const spent = Number(await client.get(key));   // both read 0.004000
+await client.set(key, spent + cost);           // both write 0.005000
+```
+
+Two concurrent requests, each costing $0.001:
+
+```
+request A:  reads 0.004000  ──┐
+request B:  reads 0.004000  ──┤ both saw the same value
+request A:  writes 0.005000   │
+request B:  writes 0.005000  ─┘ ← A's spend VANISHED
+```
+
+You charged for one call and recorded one. `INCRBYFLOAT` is a **single atomic operation**
+inside Redis — no read step for anyone to interleave with:
+
+```js
+await client.incrByFloat(key, usd);            // 0.004 → 0.005 → 0.006
+```
+
+> **Production note:** floats drift. `INCRBYFLOAT` uses long double internally, which is
+> fine at this scale, but real billing systems store **integers** — micro-dollars via
+> `INCRBY`, formatted for display — so repeated addition can never accumulate error.
+
+### The race that remains, and its size
+
+Atomic *recording* doesn't make the *check* atomic:
+
+```
+request A:  check → $0.009 spent of $0.010, allowed  ──┐
+request B:  check → $0.009 spent of $0.010, allowed  ──┤ neither has recorded yet
+request A:  costs $0.004, records → $0.013             │
+request B:  costs $0.004, records → $0.017            ─┘ ← 70% over the limit
+```
+
+With **N concurrent requests, the worst-case overshoot is N calls.** We measured 67% over
+with a single sequential request; concurrency makes it worse in proportion.
+
+The fixes, and why we didn't:
+
+1. **Concurrency cap per user** — a semaphore allowing one in-flight call each. Bounds the
+   overshoot to exactly one call. Cheap, and what I'd add first in production.
+2. **Reserve-then-refund** — estimate the cost, `INCRBYFLOAT` it up front, refund the
+   difference after. Accurate, but needs a decent estimator and refund logic, and a crash
+   between the two leaks the reservation permanently.
+3. **Lua script** — do check-and-increment atomically inside Redis. Solves the race, but
+   still can't know the cost before the call, so it only helps once you're reserving.
+
+> **The unavoidable core:** you cannot pre-authorise an LLM call, because its cost doesn't
+> exist until it finishes. Everything above is about bounding the overshoot, never
+> eliminating it. A limit with a **stated tolerance** is honest; one claiming to be exact
+> is wrong.
+
+### Return 429, not 403
+
+**403 Forbidden** means "you may not do this" — a permissions decision, permanent.
+**429 Too Many Requests** means "not right now" — a rate limit, and it resets.
+
+Clients treat them completely differently: a 403 is a bug to report, a 429 is a signal to
+back off and retry later. Getting this wrong sends users to support for something that
+would have fixed itself.
+
+And send the header that tells them *when*:
+
+```js
+res.writeHead(429, {
+  'Retry-After': secondsUntilMidnightUTC(),   // e.g. 14400
+  'Content-Type': 'application/json',
+});
+```
+
+### What per-user limits don't cover
+
+A per-user cap stops one customer bankrupting you. It doesn't stop **ten thousand**
+customers each spending their full allowance on the day your app gets popular.
+
+Production wants both: a per-user limit *and* a **global circuit breaker** — total spend
+per hour across all users, which trips and degrades the service rather than letting the
+bill run. Same Redis, one more counter, no user id in the key.
 
 ## 6. Model routing break-even
 
