@@ -383,10 +383,43 @@ for (const id of ids) {                       // every entry in the namespace
 }
 ```
 
+### What that looks like on the wire
+
+```
+  YOUR SERVER                                            REDIS
+       │                                                   │
+       ├──── "give me entry #1" ──────────────────────────▶│
+       │                    ⏳ waiting ~150 µs              │
+       │◀─────────────────── {question, embedding, …} ─────┤
+       │  compare  ▪ 2 µs                                  │
+       │                                                   │
+       ├──── "give me entry #2" ──────────────────────────▶│
+       │                    ⏳ waiting ~150 µs              │
+       │◀─────────────────── {question, embedding, …} ─────┤
+       │  compare  ▪ 2 µs                                  │
+       │                                                   │
+       ├──── "give me entry #3" ──────────────────────────▶│
+       │                       …                           │
+       │             × 500 more times                      │
+       ▼                                                   ▼
+```
+
+**Look at how much of that picture is the word "waiting".**
+
 ### Where the time actually goes
 
 People assume the maths is the slow part. It isn't — and knowing which part is slow is
 what tells you how to fix it.
+
+```
+   ONE ENTRY  =  ~172 µs total
+
+   network  ████████████████████████████████████████████  150 µs   87%
+   parse    ██████                                         20 µs   12%
+   maths    ▏                                               2 µs    1%
+            └──────────────────────────────────────────────┘
+              the part everyone worries about is the sliver
+```
 
 | Per entry | Roughly | Notes |
 |---|---|---|
@@ -394,17 +427,27 @@ what tells you how to fix it.
 | `JSON.parse` of 384 floats | **~20 µs** | 10× the maths, and pure waste |
 | **Redis round trip** | **~150 µs** | **75× the maths — this is the bottleneck** |
 
-So the cost is dominated by *talking to Redis*, not by comparing vectors:
+### How it scales — and where it stops being worth doing
+
+A model call costs about **600 ms**. That's the bar the cache has to beat:
 
 ```
-   100 entries  →  100 round trips  →   ~17 ms
-   500 entries  →  500 round trips  →   ~85 ms      ← our cap
- 5,000 entries  →  5,000           →  ~850 ms      ← slower than the model call!
-50,000 entries  →  50,000          →    ~8.5 s     ← hopeless
+ entries                                                    time    verdict
+ ─────────────────────────────────────────────────────────────────────────────
+     100   ▇                                                 17 ms   ✅ 35× faster
+     500   ▇▇▇▇▇                                             85 ms   ✅ 7× faster   ← our cap
+   1,000   ▇▇▇▇▇▇▇▇▇▇                                       170 ms   ✅ 3.5× faster
+   3,500   ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇           600 ms   ⚠️  break-even
+   5,000   ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇  850 ms   ❌ SLOWER than asking
+  50,000   ▇▇▇▇▇▇▇▇… (off the chart)                        8.5 s   ❌❌ hopeless
+ ─────────────────────────────────────────────────────────────────────────────
+                    model call ≈ 600 ms  ────────────────────┘
 ```
 
-**At 5,000 entries the cache becomes slower than the thing it exists to avoid.** That's
-the crossover, and it's much earlier than people expect.
+**Somewhere around 3,500 entries the cache becomes slower than the thing it exists to
+avoid** — and it still costs you the embedding call on top. That crossover is much earlier
+than people expect, which is why "it's only a few hundred entries" is a statement with a
+shelf life.
 
 ### Fixing it, in order of effort
 
@@ -417,8 +460,24 @@ for (const id of ids) pipeline.hGetAll(entryKey(userId, id));
 const rows = await pipeline.exec();     // ONE round trip
 ```
 
-That alone takes 500 entries from ~85 ms to ~5 ms. Same algorithm, same O(n) comparisons
-— you just stopped paying network latency 500 times.
+```
+  WITHOUT PIPELINING                  WITH PIPELINING
+  ──────────────────                  ───────────────
+  ask ──▶ ⏳ ──▶ get                   ask ┐
+  ask ──▶ ⏳ ──▶ get                   ask │
+  ask ──▶ ⏳ ──▶ get                   ask ├──▶ ⏳ once ──▶ get all 500 back
+  ask ──▶ ⏳ ──▶ get                   ask │
+        … 500 times …                  ask ┘
+                                            (500 requests, one wait)
+  500 × 150 µs  =  85 ms              1 × 150 µs + work  ≈  5 ms
+```
+
+Same algorithm. Same 500 comparisons. **You just stopped paying network latency 500
+times** — and it's a ~17× speedup for four lines of code.
+
+> The general lesson, which long outlives this project: when something is slow in a loop,
+> check whether you're paying a round trip per iteration before you optimise the
+> arithmetic. This is the same bug as an N+1 query in SQL.
 
 **2. Store vectors as binary, not JSON.** A `Float32Array` written as a raw buffer needs
 no parsing at all, and is 4 bytes per dimension instead of ~12 characters:
@@ -428,28 +487,137 @@ Buffer.from(new Float32Array(vec).buffer)    // 1,536 bytes vs ~4,600 of JSON
 ```
 
 **3. Use an index.** This is the one that changes the complexity class rather than the
-constant factor.
+constant factor — and it's worth genuinely understanding rather than treating as magic.
 
-> **In Part A terms:** instead of holding up every card, you build a **shortcut map**.
-> Cards that are similar get linked to each other, in layers — a coarse layer that lets
-> you jump between neighbourhoods, then finer layers within one. You land in roughly the
-> right area in a few hops and only compare the handful of cards there.
+#### First, the card-box picture
+
+```
+  WITHOUT AN INDEX — hold up every card
+  ┌──────────────────────────────────────────────────────┐
+  │  ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤ ▤   │
+  │  ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑   │
+  │  compare … compare … compare … compare … all of them │
+  └──────────────────────────────────────────────────────┘
+
+  WITH AN INDEX — cards grouped, with signposts between groups
+  ┌──────────────────────────────────────────────────────┐
+  │     [delivery] ──── [returns] ──── [payments]        │  ① pick the
+  │          │              │               │            │     neighbourhood
+  │       ▤ ▤ ▤ ▤        ▤ ▤ ▤ ▤         ▤ ▤ ▤ ▤         │  ② check ~4 cards
+  └──────────────────────────────────────────────────────┘
+```
+
+#### Now the real structure: HNSW
+
+**H**ierarchical **N**avigable **S**mall **W**orld. It's a stack of layers — sparse at the
+top for long jumps, complete at the bottom.
+
+Imagine meaning laid out along a line, A to W, and we're searching for something near **P**:
+
+```
+  LAYER 2   few nodes, huge jumps — "which half of the map?"
+
+     (A)━━━━━━━━━━━━━━━━━━━━━(M)━━━━━━━━━━━━━━━━━━━━━(W)
+
+
+  LAYER 1   more nodes, medium jumps — "which neighbourhood?"
+
+     (A)━━━━(E)━━━━(I)━━━━(M)━━━━(Q)━━━━(T)━━━━(W)
+
+
+  LAYER 0   everything, short links — "which exact card?"
+
+     (A)(B)(C)(D)(E)(F)(G)(H)(I)(J)(K)(L)(M)(N)(O)(P)(Q)(R)(S)(T)(U)(V)(W)
+```
+
+**Searching for P:**
+
+```
+  ① LAYER 2 — start anywhere, say (A)
+       compare A, M, W  ······················· 3 comparisons
+       M is closest to P  →  stand on M
+                    │
+                    ▼  descend
+  ② LAYER 1 — from (M), look at its neighbours
+       compare I, Q  ·························· 2 comparisons
+       Q is closest to P  →  stand on Q
+                    │
+                    ▼  descend
+  ③ LAYER 0 — from (Q), look at its neighbours
+       compare P, R  ·························· 2 comparisons
+       P wins ✓
+                                               ─────────────
+                                                7 comparisons
+                                                (not 23)
+```
+
+You skipped A–O entirely. **You never even looked at most of the box.**
+
+That ratio is the whole point, and it gets better as the box grows:
+
+```
+  entries        full scan        HNSW (roughly)
+  ─────────────────────────────────────────────────
+        23              23                  7
+     1,000           1,000                ~30
+    50,000          50,000                ~50
+ 1,000,000       1,000,000                ~60     ← barely moved
+```
+
+Full scan grows **linearly**. HNSW grows **logarithmically** — which is why a million
+vectors is a normal Tuesday for a vector database and impossible for our loop.
+
+#### ⚠️ The catch: it's approximate
+
+The **A** in ANN — *approximate* nearest neighbour — is doing real work.
+
+```
+     (A)━━━━━━━━━━━━━━━━━━━━━(M)━━━━━━━━━━━━━━━━━━━━━(W)
+      ↑
+      └── suppose the TRUE best match for P was hiding back here.
+
+  We jumped to M on step ① and never returned. We'd never find it.
+```
+
+You are trading **recall** (did I find the genuinely closest one?) for speed. Tunable —
+HNSW has knobs like `ef_search` that widen the search and cost more time — but never zero.
+
+> **For a cache that's a fine trade:** a missed match means one extra model call, which is
+> exactly what would have happened without a cache.
 >
-> It's **approximate**: occasionally the true best card is in a neighbourhood you skipped.
-> You trade a little accuracy for orders of magnitude in speed, and for a cache that's an
-> easy trade.
+> **For project 05's retrieval it matters more:** a missed chunk means the answer is
+> generated without the paragraph that contained the truth. Same structure, higher stakes
+> — which is why project 06 measures retrieval quality separately from answer quality.
 
-That structure is **HNSW** — Hierarchical Navigable Small World. In Redis:
+#### The commands
+
+You don't build any of that yourself. You declare the index and the database maintains it:
 
 ```
 FT.CREATE idx ON HASH PREFIX 1 cache:e:
   SCHEMA embedding VECTOR HNSW 6 TYPE FLOAT32 DIM 384 DISTANCE_METRIC COSINE
+                          ─┬──                 ─┬──        ─┬──    ──────┬──────
+                           │                    │           │            │
+              build an HNSW index    32-bit floats    384 dims    cosine distance
 
 FT.SEARCH idx "*=>[KNN 5 @embedding $vec AS score]" PARAMS 2 vec <bytes>
+                     ──┬──
+                       └── "give me the 5 nearest to $vec"
 ```
 
-`KNN 5` = "give me the 5 nearest", and Redis does the search internally — no loop, no
-round trip per entry. Roughly O(log n) instead of O(n).
+**One command replaces the entire loop.** No round trip per entry, no `JSON.parse`, no
+`for`. Redis walks the layers internally and hands back the 5 nearest. Roughly O(log n)
+instead of O(n).
+
+pgvector is the same idea with SQL syntax — you'll write it in project 05:
+
+```sql
+CREATE INDEX ON chunks USING hnsw (embedding vector_cosine_ops);
+
+SELECT text FROM chunks ORDER BY embedding <=> $1 LIMIT 5;
+--                                        ─┬─
+--                                         └── cosine distance operator
+```
 
 **We hand-roll the loop because the arithmetic is the lesson.** Once you've written
 `cosine()` yourself, an index stops being magic — it's just a faster way to run the
