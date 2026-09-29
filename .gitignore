@@ -21,3 +21,7 @@ PRACTICE.md
 # Resume drafts stay local too. A public repo containing your own resume wording
 # reads as optimising for appearances rather than building.
 RESUME.md
+
+# Personal reference notes — background topics (networking, protocols, tooling)
+# looked up along the way. Useful to revisit; not part of the project.
+reference/
