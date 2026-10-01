@@ -439,6 +439,86 @@ scanned PDFs must fail loudly.
 
 ---
 
+## ⭐ Problem 8 — Two questions in one, and the limit of this design
+
+Found by testing on a real 347-page book rather than the 4-page sample. **It is a genuine
+limitation, not a bug**, and it's the most useful thing this project taught.
+
+Ask a question whose answer lives in two distant places:
+
+> *"What does the author say about both the monkey mind **and** about reprogramming your
+> brain like software?"*
+
+It gets **refused** — *"the passages do not contain any mention of the monkey mind"*. Which
+is simply untrue: page 35 says exactly that, and asking about the monkey mind alone finds
+it immediately.
+
+**Each half works. The combination doesn't:**
+
+```
+  monkey mind alone      → pages  35, 35, 35, 36, 33       ✓
+  software alone         → pages  234, 39, 234, 9, 103     ✓
+  COMBINED               → pages  234, 234, 39, 9, 39      ✗  page 35 gone
+
+  "what happened to Ali"           → pages  7, 312, 154, 320, 237    ✓
+  "how suffering changed his view" → pages  82, 22, 15, 288, 5       ✓
+  COMBINED                         → pages  142, 288, 335, 177, 240  ✗  neither half
+```
+
+### Why
+
+**One question becomes one embedding — one point on the map.** A two-topic question
+averages both topics, and an average lands *between* them, near neither:
+
+```
+     monkey mind ●                                    ● software
+                        ○ ← the combined query lands here, and the
+                            nearest chunks are whatever generic
+                            "mind/suffering" prose sits in the middle
+```
+
+In the second case it landed in a region of general "suffering and meaning" material and
+retrieved five chunks of that instead — pages **neither** sub-query had found.
+
+### The part that matters
+
+**The system failed safely.** Handed only software passages, it refused rather than
+inventing a monkey-mind claim. **Grounding worked perfectly; retrieval was the weak link.**
+
+Which is precisely why `/v1/search` exposes retrieval on its own, and why project 06
+scores retrieval quality *separately* from answer quality. From the answer alone, "the
+book doesn't say that" and "we failed to find where the book says that" are
+indistinguishable — and they have completely different fixes.
+
+**The fixes:** *query decomposition* — have the model split a compound question into
+sub-queries, retrieve for each, answer over the union. And *reranking* — a cross-encoder
+scores each candidate against the **full question text** rather than comparing two
+averaged vectors, so it can recognise a passage that satisfies one half.
+
+> **The rule: a single query embedding cannot retrieve for two distinct topics at once.**
+
+## ⭐ Problem 9 — The gate scales inversely with document breadth
+
+Also only visible with two documents of different sizes. Compare *which* lock caught each
+out-of-scope question:
+
+| | 4-page handbook | 347-page book |
+|---|---|---|
+| Caught by **Lock 1** (gate — free, no model call) | most refusals | **only "configure Redis"** |
+| Caught by **Lock 2** (the model) | the grade-12 trap | **everything else** |
+
+On a **narrow** document, nearly any off-topic question scores badly, so the gate catches
+it for nothing. On a **broad** book about the mind, almost any question about thoughts,
+habits, anxiety or routines has something semantically nearby — so the gate waves it
+through and the structured-output lock does all the work.
+
+The gate cannot tell *"this book discusses morning routines"* from *"this book describes a
+**five-step** morning routine"*. Only something that has read the passages can.
+
+> **This is the argument for layering rather than tuning.** Neither lock is sufficient,
+> and which one carries the load depends on the document — so there is no single
+> configuration to get right.
+
 ## What carries into project 06
 
 You now have a system that refuses — but **how do you know it refuses the right things?**

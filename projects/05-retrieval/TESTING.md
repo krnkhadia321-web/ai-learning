@@ -434,6 +434,188 @@ grade/number pairing.
 
 ---
 
+---
+---
+
+# PART C — Testing against a real book
+
+Everything above uses the 4-page sample handbook. **A real document behaves differently**,
+and the differences are the interesting part.
+
+Worked example: *That Little Voice In Your Head* (Mo Gawdat, 2022) — **347 pages,
+1,380 chunks, ingested in 28 seconds** (24s of that embedding, locally, for free).
+
+> That number is the argument for local embeddings in one line. 1,380 calls to a
+> rate-limited free API tier would have stalled partway through.
+
+Adapt the question categories below to whatever you ingest. The **categories** are the
+reusable part, not the specific questions.
+
+## C1. The seven categories worth testing
+
+| Category | Why | Example (book) |
+|---|---|---|
+| **Core concept** | should answer | *"What does the author mean when he says you are not the voice in your head?"* |
+| **Specific personal detail** | should answer, easy to verify | *"What happened to the author's son Ali?"* |
+| **Obviously foreign** | should be **gated** | *"How do I configure Redis maxmemory?"* |
+| **Wrong proper noun** | one character off something real | *"What does the author say about his son **Omar**?"* |
+| **Invented structure** | presupposes a list that doesn't exist | *"What are the author's **seven** types of inner voice?"* |
+| **Plausible but absent** | topically adjacent, genuinely not covered | *"What does the author say about the **ketogenic diet**?"* |
+| **Wrong attribution** | a real book/person the author didn't discuss | *"What does he say about **The Untethered Soul**?"* |
+
+**Measured — 11/11 behaved correctly:**
+
+```
+✅ "you are not the voice"            cites pp. 35, 36      sim 0.650
+✅ "the code that runs your brain"    cites pp. 234, 10, 9  sim 0.606
+✅ "what happened to Ali"             cites pp. 312, 237    sim 0.657
+
+🛑 Redis config                       gated at 0.138        $0.0000000
+🛑 HTTP 429                           model refused
+🛑 "his son Omar"                     model refused
+🛑 "seven types of inner voice"       "they only discuss inner speech in general
+                                       without listing specific categories"
+🛑 "five-step morning routine"        model refused
+🛑 SSRI dosage                        model refused
+🛑 The Untethered Soul                model refused
+🛑 ketogenic diet                     model refused
+```
+
+## C2. ⭐ The gate scales inversely with document breadth
+
+**The most important difference from the handbook.** Look at *which lock* caught each trap:
+
+| | 4-page handbook | 347-page book |
+|---|---|---|
+| Caught by **Lock 1** (gate, free) | most refusals | **only Redis** |
+| Caught by **Lock 2** (model) | the grade-12 trap | **everything else** |
+
+On a narrow document, almost any off-topic question scores badly and the gate catches it
+for free. On a broad book about the mind, *almost any* question about thoughts, anxiety,
+habits or routines has something semantically nearby — so the gate passes it, and the
+structured-output lock does nearly all the work.
+
+The gate cannot distinguish *"this book discusses morning routines"* from *"this book
+describes a **five-step** morning routine"*. Only something that has read the passages can.
+
+> **This is the argument for layering rather than tuning.** Neither lock is sufficient,
+> and which one carries the load depends on the document — so you can't pick one.
+
+## C3. ⭐ The altered-quote trap — run it with its control
+
+The best single test in this file, because it isolates one changed word.
+
+Find a real, specific detail in your document, then ask about a version with **one thing
+altered** — and ask the true version too, as a control. Without the control you can't tell
+a correct refusal from a system that refuses everything.
+
+**Measured:**
+
+```
+🛑 "Pink Floyd's 'Comfortably Numb'"   → refused
+✅ "Pink Floyd's 'Brain Damage'"       → answered, cites pp. 35, 34     ← control
+
+🛑 "what does HINDUISM call the voice" → refused
+✅ "what do Buddhism and Islam call it"→ "Islam calls it the whispers, and Buddhism
+                                          calls it the monkey mind"  p. 35  ← control
+
+🛑 "I always KNEW it was me"           → "The passages state that the author thought
+                                          the voice was him ('I always thought it was
+                                          me'), but they do not explain what he means
+                                          by 'knew'"
+```
+
+**That last one is the best result in the project.** The model didn't just refuse — it
+**quoted the real text back to correct the false premise**. That is only possible if it
+genuinely read the passage rather than pattern-matching a refusal.
+
+> Verify the control answers by hand. The Buddhism/Islam one is checkable against page 35
+> in under a minute, and *checking* is the entire point.
+
+## C4. ⭐⭐ Multi-hop: where this system genuinely fails
+
+**The real limitation, reproducible, and it is a retrieval failure — not a grounding one.**
+
+Ask a question whose answer lives in two distant places:
+
+```
+"What does the author say about both the monkey mind AND about
+ reprogramming your brain like software?"
+```
+
+**Expect it to be REFUSED** — *"the passages do not contain any mention of the monkey
+mind"*. Which is false: page 35 says exactly that, and C3's control proves it retrieves
+fine on its own.
+
+**Prove the diagnosis — ask each half separately** (Retrieval tab, or `/v1/search`):
+
+```
+  monkey mind alone      → pages  35, 35, 35, 36, 33       ✓ found
+  software alone         → pages  234, 39, 234, 9, 103     ✓ found
+  COMBINED               → pages  234, 234, 39, 9, 39      ✗ page 35 GONE
+```
+
+And a second case, which is worse:
+
+```
+  "what happened to Ali"           → pages  7, 312, 154, 320, 237    ✓
+  "how suffering changed his view" → pages  82, 22, 15, 288, 5       ✓
+  COMBINED                         → pages  142, 288, 335, 177, 240  ✗
+```
+
+**The combined query retrieved pages that NEITHER sub-query found.**
+
+### Why this happens
+
+One question becomes **one embedding** — a single point on the map of meaning. A
+two-topic question averages both topics, and the average lands **between** them:
+
+```
+        monkey mind ●                                   ● software
+                          ○ ← the combined query lands here,
+                              near neither, and nearest to whatever
+                              generic "mind/suffering" material sits
+                              in the middle
+```
+
+In the second case it landed in a region of generic "suffering and meaning" prose and
+retrieved five chunks about that instead.
+
+### What this tells you, and what fixes it
+
+**The system failed safely.** Given only software passages, it refused rather than
+inventing a monkey-mind claim. Grounding worked perfectly; **retrieval was the weak link** —
+which is exactly why `/v1/search` exists, and why project 06 scores retrieval quality
+*separately* from answer quality.
+
+The fix is **query decomposition**: have the model split a multi-part question into
+sub-queries, retrieve for each, merge the results, then answer over the union. Also worth
+knowing: **reranking** (a cross-encoder scoring each candidate against the full question,
+rather than comparing two averaged vectors) helps here too.
+
+> **The rule:** a single query embedding cannot retrieve for two distinct topics at once.
+> If your users ask compound questions, you need to decompose them.
+
+## C5. Your own document — a 10-minute checklist
+
+1. Ingest it. Note the chunk count and embedding time.
+2. Pick **three facts you know are in it** → all three should answer with citations you
+   can check by opening the page.
+3. **Open one cited page and read it.** Don't skip this. A correct-looking answer with a
+   real citation can still be a bad compression of what the page says.
+4. Ask **two obviously foreign** questions → expect gating at **$0.0000000**.
+5. Ask **one wrong proper noun** and **one invented structure** → expect refusals with
+   *specific* reasons, not generic ones.
+6. Run **one altered-quote trap with its control** (C3).
+7. Run **one multi-hop question** (C4) and check whether it finds both halves.
+
+> ⚠️ **Expect `no_checkable_facts` on prose.** The fact-check only verifies numbers and
+> codes. A book answers mostly in sentences, so that verdict is honest rather than a
+> failure — it's saying *"I had nothing mechanical to check"*, not *"everything is fine"*.
+
+---
+---
+
 ## Shut down
 
 ```bash
