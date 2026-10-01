@@ -321,7 +321,207 @@ the index — correct-looking results, terrible performance, no error.
 chunk; duplicates then crowd out genuinely different passages, degrading retrieval in a
 way that's very hard to notice.
 
-## 4. ⭐ The bug: `plainto_tsquery` ANDs everything
+## 4. ⭐ HNSW in depth — how the vector index actually works
+
+Project 04's notes introduce HNSW as a "shortcut map" and show a search path. This is the
+level below that: how it's **built**, what the **parameters** trade, and — measured on
+this project's own data — when it's actually worth having.
+
+### What the name means
+
+**H**ierarchical **N**avigable **S**mall **W**orld. Each word is load-bearing.
+
+**Small world** is the "six degrees of separation" idea. In a small-world network, any
+node reaches any other in surprisingly few hops, because most links are *local* (to near
+neighbours) but a few are *long-range*. Your friends are mostly nearby — but one friend
+moved to Canada, and through them you're three hops from half of Canada.
+
+**Navigable** means you can find your way using only local information: from wherever you
+are, step to whichever neighbour is closer to the target, repeat. No global map needed.
+
+**Hierarchical** means several of these networks stacked, sparse at the top for long jumps
+and complete at the bottom for precision.
+
+### How it's BUILT — the part usually skipped
+
+Each vector, on insertion, is assigned a **maximum layer** at random, with exponentially
+decaying probability:
+
+```
+   layer 3   ░                      ~0.1% of vectors reach here
+   layer 2   ░░░                    ~1%
+   layer 1   ░░░░░░░░░░             ~10%
+   layer 0   ████████████████████   100% — everything lives here
+```
+
+Then it's connected:
+
+```
+   1. Start at the entry point, on the TOP layer.
+   2. Greedily walk to the nearest node you can see.
+   3. Drop down one layer. Walk again from where you landed.
+   4. Repeat until you reach the new vector's own max layer.
+   5. From there down to layer 0, connect it to its `m` nearest neighbours
+      on each layer.
+```
+
+So the structure builds itself: the rare high-layer nodes become **motorway junctions**,
+and layer 0 holds every vector with short local links. Searching is the same walk,
+starting from the top.
+
+```
+   SEARCH for ●
+
+   layer 2    A ────────────────────── M ────────────────────── W
+              └─ start, compare 3 ──▶ M is nearest ──┐
+                                                      ▼ descend
+   layer 1    A ──── E ──── I ──── M ──── Q ──── T ──── W
+                                    └─ compare 2 ──▶ Q ──┐
+                                                          ▼ descend
+   layer 0    A B C D E F G H I J K L M N O P Q R S T U V W
+                                            └─ compare 2 ──▶ P ✓
+
+              7 comparisons, not 23. Most of the data never looked at.
+```
+
+### The three parameters
+
+| Parameter | Set at | Controls | Trade |
+|---|---|---|---|
+| **`m`** | index build | links per node per layer (default 16) | higher = better recall, bigger index, slower build |
+| **`ef_construction`** | index build | how hard it searches *while inserting* (default 64) | higher = better-connected graph, much slower build |
+| **`ef_search`** | query time | how many candidates to keep while walking (default 40) | **higher = better recall, slower query** |
+
+**`ef_search` is the one you tune in production**, because it's per-query and needs no
+rebuild:
+
+```sql
+SET hnsw.ef_search = 100;   -- session-level, before your query
+```
+
+It must be ≥ your `LIMIT`. Asking for `LIMIT 50` with `ef_search = 40` gives you worse
+results than you asked for, silently.
+
+### ⭐ Measured on this project
+
+The honest question is *when is the index worth having*. Benchmarked here, warm cache,
+384 dimensions, cosine:
+
+| rows | HNSW | brute force | speed-up | planner's own choice |
+|---|---|---|---|---|
+| **1,388** (this book) | **0.62 ms** | 3.90 ms | 6× | ⚠️ *chose Seq Scan* |
+| 5,000 | 0.23 ms | 3.90 ms | 17× | Index Scan |
+| 15,000 | 0.38 ms | 13.91 ms | 36× | Index Scan |
+| 50,000 | 0.52 ms | 29.39 ms | **56×** | Index Scan |
+
+**Look at the two columns separately.** Brute force grows **linearly** — 3.9 → 29.4 ms as
+rows go 5k → 50k. HNSW barely moves — 0.23 → 0.52 ms across the same 10×. That's
+**O(n) versus roughly O(log n)**, visible in real numbers rather than asserted.
+
+### ⚠️ Three things that measurement taught
+
+**1. The first run of any benchmark is not a measurement.**
+
+```
+   run 1   HNSW  57.3 ms   brute  16.9 ms    ← cold cache, meaningless
+   run 2   HNSW   0.62 ms  brute   4.59 ms
+   run 3   HNSW   0.63 ms  brute   3.90 ms
+```
+
+The cold number is **90× worse** than the warm one. I nearly wrote "HNSW is slower than
+brute force at small scale" into these notes on the strength of a single cold run. Always
+warm the cache, always run it three times.
+
+**2. The planner may ignore an index you built.** At 1,388 rows Postgres chose a Seq Scan
+even though HNSW was ~6× faster. Its cost model estimates, and on a small table with wide
+rows (text + tsvector + vector) it over-estimates the cost of fetching heap pages.
+
+To check whether the index *would* help:
+
+```sql
+SET enable_seqscan = off;   -- session only, for diagnosis, never in application code
+EXPLAIN (ANALYZE) SELECT ... ORDER BY embedding <=> $1 LIMIT 5;
+```
+
+If forcing it is dramatically faster, the planner is mis-estimating. Usually that means
+`ANALYZE` hasn't run, or the table is small enough that it genuinely doesn't matter.
+
+**3. Filtering and ANN fight each other.** With `WHERE document_id = $1`, Postgres used
+the **B-tree on `document_id`**, not HNSW at all:
+
+```
+  ->  Bitmap Index Scan on chunks_document_idx (rows=1380)
+```
+
+Sensible here — 1,380 of 1,388 rows matched, so the filter excludes nothing.
+
+But the general problem is real and worth knowing. An HNSW search returns the *k* nearest
+overall; filter afterwards and you may be left with fewer than *k*, or none. Filter first
+and you've done a sequential scan. pgvector 0.8 added **iterative scan** for exactly this:
+
+```sql
+SET hnsw.iterative_scan = relaxed_order;   -- keep searching until k survive the filter
+```
+
+If you have many documents and always query one, **partitioning by `document_id`** is the
+structural answer.
+
+### Index size and build cost
+
+```
+  chunks table      8,352 kB
+  HNSW index        2,784 kB     ← a third of the table
+  GIN (tsv) index   1,568 kB
+```
+
+HNSW is **memory-hungry and slow to build** — Postgres warned
+`HINT: Increase maintenance_work_mem to speed up builds`. For a large table, raise it
+before building:
+
+```sql
+SET maintenance_work_mem = '512MB';
+CREATE INDEX ... USING hnsw (embedding vector_cosine_ops);
+```
+
+If the graph doesn't fit in `maintenance_work_mem` the build spills to disk and gets
+dramatically slower.
+
+### HNSW vs IVFFlat
+
+pgvector offers both:
+
+| | HNSW | IVFFlat |
+|---|---|---|
+| Structure | layered graph | clusters data into lists, searches the nearest few |
+| Build | slow, memory-hungry | fast |
+| Query | faster, better recall | decent |
+| Needs existing data? | **no** | **yes** — must be built on populated data to learn clusters |
+| New rows | handled incrementally | degrade over time; needs periodic rebuild |
+
+**HNSW is the default choice now.** IVFFlat is worth it when build time or memory is the
+binding constraint.
+
+### ⚠️ The operator class must match the query operator
+
+```sql
+CREATE INDEX ... USING hnsw (embedding vector_cosine_ops);   -- built for <=>
+SELECT ... ORDER BY embedding <=> $1;                        -- cosine distance ✓
+```
+
+| Operator | Distance | Operator class |
+|---|---|---|
+| `<=>` | cosine | `vector_cosine_ops` |
+| `<->` | L2 / Euclidean | `vector_l2_ops` |
+| `<#>` | negative inner product | `vector_ip_ops` |
+
+Mismatch them and Postgres **silently ignores the index**. No error, correct-looking
+results, and performance that quietly collapses as the table grows. The only symptom is a
+`Seq Scan` in `EXPLAIN` where you expected an `Index Scan`.
+
+> Since our embeddings are **normalised**, cosine and inner product rank identically —
+> but the index still has to be built for whichever operator you actually use.
+
+## 5. ⭐ The bug: `plainto_tsquery` ANDs everything
 
 The measured one, and it's invisible without looking.
 
@@ -352,7 +552,7 @@ matches nothing instead of raising a syntax error.
 > still returns results. Test each retriever **in isolation** — which is why `/v1/search`
 > exists as a separate endpoint.
 
-## 5. Reciprocal Rank Fusion
+## 6. Reciprocal Rank Fusion
 
 ```sql
 COALESCE(1.0/(60 + v.rank), 0) + COALESCE(1.0/(60 + k.rank), 0)
@@ -365,7 +565,7 @@ only one method is exactly the material the other is blind to.
 Retrieve **more candidates than you return** (20 → 5). A chunk ranked 15th by vectors and
 2nd by keywords deserves a chance, and only sees one if both lists are deep enough.
 
-## 6. Chunking parameters
+## 7. Chunking parameters
 
 | Parameter | Default | Effect |
 |---|---|---|
@@ -376,7 +576,7 @@ Retrieve **more candidates than you return** (20 → 5). A chunk ranked 15th by 
 Characters, not tokens — a rough proxy (~4 chars/token) you can reason about directly.
 Recursive splitting on `\n\n` → `\n` → `. ` → ` ` → character.
 
-## 7. Grounding, in order of strength
+## 8. Grounding, in order of strength
 
 | Mechanism | Can the model defeat it? |
 |---|---|
@@ -394,7 +594,7 @@ similarity.
 numbers, and a number can appear while meaning something else. Proper groundedness
 scoring uses a judge model over (claim, passage) pairs — that's project 06.
 
-## 8. PDF extraction
+## 9. PDF extraction
 
 `pdfjs-dist/legacy/build/pdf.mjs` — the legacy build; the default expects browser APIs.
 
