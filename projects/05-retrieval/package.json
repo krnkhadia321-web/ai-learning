@@ -1,0 +1,21 @@
+{
+  "name": "05-retrieval",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "RAG over your own PDFs — chunking, hybrid search with pgvector, reranking, and answers grounded in cited passages or refused.",
+  "scripts": {
+    "dev": "node --env-file=../../.env --watch src/server.js",
+    "start": "node --env-file=../../.env src/server.js",
+    "ingest": "node --env-file=../../.env src/ingest.js",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:reset": "docker compose down -v && docker compose up -d"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "pdfjs-dist": "^4.10.38",
+    "pg": "^8.13.1",
+    "zod": "^3.25.76"
+  }
+}

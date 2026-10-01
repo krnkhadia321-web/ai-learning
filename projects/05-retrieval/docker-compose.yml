@@ -1,0 +1,52 @@
+# Postgres with pgvector, plus Redis carried over from project 04.
+#
+# WHY POSTGRES RATHER THAN A DEDICATED VECTOR DATABASE:
+#
+# Retrieval needs BOTH kinds of search. Vectors find things that mean the same thing;
+# keyword search finds exact terms. Ask about "section 4.2" and embeddings will happily
+# hand you section 4.1 — they encode meaning, and those two mean almost the same thing.
+#
+# Postgres gives you both in ONE system: pgvector for similarity, built-in tsvector for
+# keyword matching. Use Qdrant or Weaviate and you run a second database, keep it in sync
+# with your source of truth, and still need Postgres for the documents themselves.
+#
+# "You probably don't need a vector database" is the current consensus for anything under
+# a few million vectors — and being able to argue that is worth more than knowing a
+# vendor's API.
+
+services:
+  postgres:
+    # The official pgvector image: Postgres with the extension already compiled in.
+    image: pgvector/pgvector:pg17
+    container_name: ai-learning-postgres
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+      POSTGRES_DB: rag
+    ports:
+      - '5433:5432'
+    # 5433 on the host, deliberately: 5432 is often already taken by a local Postgres
+    # install or another project's container, and "port already in use" is a confusing
+    # first error to hit.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # A volume here, unlike project 04's Redis. Re-ingesting a 300-page book takes
+    # minutes, so losing it on every restart would be genuinely annoying — this is a
+    # datastore, not a cache.
+    mem_limit: 512m
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U rag -d rag']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:alpine
+    container_name: ai-learning-redis
+    ports:
+      - '6379:6379'
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru --save ""
+    mem_limit: 192m
+
+volumes:
+  pgdata:

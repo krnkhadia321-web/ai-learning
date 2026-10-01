@@ -14,7 +14,7 @@ to build the loop yourself, because the mechanism is the lesson.
 | 02  | [`tool-calling`](projects/02-tool-calling)           | Structured outputs, schema validation, tool loops, iteration caps         | ✅ built |
 | 03  | [`observability`](projects/03-observability)         | OTel traces for LLM calls, token/cost accounting, redaction               | ✅ built |
 | 04  | [`semantic-cache`](projects/04-semantic-cache)       | Redis vector cache, spend-based rate limiting, model routing              | ✅ built |
-| 05  | `retrieval`                                          | pgvector, chunking, hybrid BM25+vector search, local reranking            | planned |
+| 05  | [`retrieval`](projects/05-retrieval)                 | RAG over your own PDFs — chunking, hybrid search, grounded answers        | ✅ built |
 | 06  | `evals`                                              | Golden datasets, LLM-as-judge, CI quality gate                            | planned |
 | 07  | `mcp-server`                                         | Model Context Protocol server, real tools, wired into a client            | planned |
 | 08  | `durable-agent`                                      | BullMQ durability, checkpointing, human-in-the-loop, prompt injection     | planned |
@@ -62,6 +62,26 @@ local embeddings and Redis — plus spend-based rate limiting and cheap-model-fi
 > 03's tool audit), and per-user namespacing. The honest result is a **12% hit rate** —
 > low, and trustworthy.
 
+**05 — Retrieval (RAG).** Ask questions of your own PDFs and get answers grounded in
+cited passages — or an explicit refusal. PDF extraction, chunking with overlap at natural
+boundaries, hybrid search (pgvector + Postgres full-text, fused by Reciprocal Rank
+Fusion), and four layered grounding mechanisms.
+
+> **"Only answer from the context" in the prompt is a request, not a control.** So the
+> locks are: a **retrieval gate** that refuses before the model is ever called (measured
+> at **$0.0000000** — no model call happens), a structured `sufficient_context` field,
+> **citation ids validated in code** against what was actually supplied, and a check that
+> the answer's numbers appear in the cited text. Two of those four the model cannot defeat.
+>
+> The case that justifies layering them: asked about *"annual leave for grade 12"* — a
+> grade the handbook doesn't cover — the similarity gate **passed**, because the question
+> is textually near-identical to the grade 5/7/9 lines. The structured-output lock caught
+> it: *"the passages only specify grades 5, 7, and 9"*.
+>
+> Also measured: `plainto_tsquery` ANDs every term, so the keyword half of hybrid search
+> returned **zero rows on every natural-language question** — invisible, because the
+> vector half kept returning plausible results.
+
 ## Per-project files
 
 Every project folder carries its own learning material:
@@ -91,6 +111,7 @@ npm run dev --workspace=01-streaming-gateway    # then http://localhost:8787
 npm run dev --workspace=02-tool-calling         # then http://localhost:8788
 npm run dev --workspace=03-observability        # then http://localhost:8789
 npm run dev --workspace=04-semantic-cache       # then http://localhost:8790  (needs Redis)
+npm run dev --workspace=05-retrieval            # then http://localhost:8791  (needs Postgres)
 ```
 
 Each project's `TESTING.md` walks through every feature — browser first, command line

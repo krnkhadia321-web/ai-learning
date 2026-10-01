@@ -25,3 +25,7 @@ RESUME.md
 # Personal reference notes — background topics (networking, protocols, tooling)
 # looked up along the way. Useful to revisit; not part of the project.
 reference/
+
+# Ingested PDFs are your own documents, often private. The sample is
+# regenerated with: node scripts/make-sample-pdf.js
+projects/05-retrieval/docs/

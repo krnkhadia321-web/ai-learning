@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG — ask your documents</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.55 ui-sans-serif, system-ui, sans-serif; max-width: 920px;
+         margin: 32px auto; padding: 0 20px; }
+  h1 { font-size: 19px; margin-bottom: 2px; }
+  h2 { font-size: 12.5px; text-transform: uppercase; letter-spacing: .07em;
+       color: #888; margin: 24px 0 8px; font-weight: 600; }
+  p.sub { color: #888; margin-top: 0; }
+  .tabs { display: flex; gap: 6px; margin: 16px 0 12px; border-bottom: 1px solid #8883; }
+  .tab { padding: 8px 14px; cursor: pointer; border: none; background: none; color: inherit;
+         font: inherit; border-bottom: 2px solid transparent; }
+  .tab.on { border-bottom-color: #2563eb; font-weight: 600; }
+  .row { display: flex; gap: 8px; margin: 10px 0; flex-wrap: wrap; align-items: center; }
+  input, select, button { font: inherit; padding: 8px 10px; border-radius: 6px;
+         border: 1px solid #8884; background: transparent; color: inherit; }
+  input[type=text] { flex: 1; min-width: 260px; }
+  button { cursor: pointer; }
+  button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  button.danger { color: #dc2626; }
+  .ex { font-size: 13px; color: #2563eb; cursor: pointer; text-decoration: underline;
+        background: none; border: none; padding: 2px 0; display: block; text-align: left; }
+  .card { border: 1px solid #8883; border-radius: 8px; padding: 12px 14px; margin: 10px 0; }
+  .card.ok      { border-left: 4px solid #16a34a; }
+  .card.refused { border-left: 4px solid #d97706; background: #d9770611; }
+  .card.warn    { border-left: 4px solid #dc2626; background: #dc262611; }
+  .k { font: 11px ui-monospace, monospace; text-transform: uppercase;
+       letter-spacing: .06em; color: #888; margin-bottom: 5px; }
+  .answer { font-size: 15.5px; }
+  pre { background: #8881; padding: 9px; border-radius: 6px; overflow-x: auto;
+        font: 12.5px ui-monospace, monospace; margin: 6px 0 0; white-space: pre-wrap; }
+  .cite { border-left: 3px solid #2563eb55; padding: 6px 10px; margin: 7px 0;
+          font-size: 13.5px; background: #2563eb0d; border-radius: 0 6px 6px 0; }
+  .cite .pg { font: 11px ui-monospace, monospace; color: #2563eb; display: block; margin-bottom: 3px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th,td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #8883; vertical-align: top; }
+  th { font: 11px ui-monospace, monospace; text-transform: uppercase; color: #888; font-weight: 400; }
+  .drop { border: 2px dashed #8884; border-radius: 10px; padding: 26px; text-align: center;
+          color: #888; cursor: pointer; }
+  .drop.over { border-color: #2563eb; background: #2563eb11; color: inherit; }
+  .hide { display: none; }
+  .note { font-size: 13px; color: #888; }
+  .pill { font: 11px ui-monospace, monospace; padding: 1px 6px; border-radius: 10px;
+          background: #8882; margin-left: 5px; }
+  code { background: #8882; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>Ask your documents</h1>
+  <p class="sub">Answers grounded in cited passages — or a refusal. Nothing invented.</p>
+
+  <div class="tabs">
+    <button class="tab on" data-p="ask">Ask</button>
+    <button class="tab" data-p="search">Retrieval</button>
+    <button class="tab" data-p="docs">Documents</button>
+  </div>
+
+  <!-- ── ASK ────────────────────────────────────────────────────────────── -->
+  <section id="p-ask">
+    <div class="row">
+      <input type="text" id="q" value="How many days of annual leave does a grade 7 employee get?">
+      <select id="doc"><option value="">all documents</option></select>
+      <button class="primary" id="ask">Ask</button>
+    </div>
+    <div id="examples"></div>
+    <div id="out"></div>
+  </section>
+
+  <!-- ── RETRIEVAL ──────────────────────────────────────────────────────── -->
+  <section id="p-search" class="hide">
+    <p class="note">The same query through each method. When an answer is wrong, this tells
+      you whether <b>retrieval</b> failed or <b>reasoning</b> did — different fixes.</p>
+    <div class="row">
+      <input type="text" id="sq" value="SEC-0001">
+      <button class="primary" id="search">Compare</button>
+    </div>
+    <div id="sexamples"></div>
+    <div id="sout"></div>
+  </section>
+
+  <!-- ── DOCUMENTS ──────────────────────────────────────────────────────── -->
+  <section id="p-docs" class="hide">
+    <div class="drop" id="drop">
+      <b>Drop a PDF here</b>, or click to choose<br>
+      <span class="note">text-based only — a scanned PDF will be rejected with an explanation</span>
+      <input type="file" id="file" accept="application/pdf" class="hide">
+    </div>
+    <div id="uplog"></div>
+    <h2>Ingested</h2>
+    <div id="docs"></div>
+  </section>
+
+<script type="module">
+const $ = (id)=>document.getElementById(id);
+const esc = (s)=>String(s??'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===t));
+  for (const p of ['ask','search','docs'])
+    $('p-'+p).classList.toggle('hide', t.dataset.p !== p);
+  if (t.dataset.p === 'docs') loadDocs();
+});
+
+const SAMPLES = [
+  ['✅ grounded', 'How many days of annual leave does a grade 7 employee get?'],
+  ['✅ grounded', 'What is the meal allowance when travelling internationally?'],
+  ['✅ grounded', 'How long do I have to return my laptop after leaving?'],
+  ['🛑 out of scope', 'How do I configure Redis maxmemory policy?'],
+  ['🛑 out of scope', 'What is the capital of France?'],
+  ['⚠️ trap — looks answerable', 'How many days of annual leave does a grade 12 employee get?'],
+  ['⚠️ trap — plausible topic', 'What is the dental insurance policy?'],
+];
+$('examples').innerHTML = SAMPLES.map(([tag,q])=>
+  `<button class="ex" data-q="${esc(q)}">${tag} — ${esc(q)}</button>`).join('');
+document.querySelectorAll('#examples .ex').forEach(b=>
+  b.onclick=()=>{ $('q').value=b.dataset.q; $('ask').click(); });
+
+const SEARCH_SAMPLES = [
+  ['exact code — keyword wins', 'SEC-0001'],
+  ['paraphrase — vector wins', 'holiday allowance for senior staff'],
+  ['mixed', 'how much is the meal allowance abroad'],
+];
+$('sexamples').innerHTML = SEARCH_SAMPLES.map(([tag,q])=>
+  `<button class="ex" data-q="${esc(q)}">${tag} — ${esc(q)}</button>`).join('');
+document.querySelectorAll('#sexamples .ex').forEach(b=>
+  b.onclick=()=>{ $('sq').value=b.dataset.q; $('search').click(); });
+
+// ── ASK ──────────────────────────────────────────────────────────────────
+$('ask').onclick = async () => {
+  $('ask').disabled = true;
+  $('out').innerHTML = '<div class="card"><div class="k">thinking…</div></div>';
+  try {
+    const r = await (await fetch('/v1/ask',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:$('q').value, documentId:$('doc').value||undefined})})).json();
+
+    let html = '';
+    const meta = `${r.latencyMs}ms · $${(r.costUsd??0).toFixed(7)}`;
+
+    if (r.refused) {
+      // A refusal is a SUCCESS here, not an error. Show why, and whether it cost anything.
+      html += `<div class="card refused">
+        <div class="k">🛑 refused — ${esc(r.reason)} <span class="pill">${meta}</span>
+          ${r.gatedBeforeModel ? '<span class="pill">no model call — free</span>' : ''}</div>
+        <div class="answer">${esc(r.answer)}</div></div>`;
+    } else if (!r.grounded) {
+      html += `<div class="card warn"><div class="k">⚠ ungrounded — ${esc(r.reason)} <span class="pill">${meta}</span></div>
+        <div class="answer">${esc(r.answer)}</div>
+        <pre>${esc(r.warning ?? '')}</pre></div>`;
+    } else {
+      html += `<div class="card ok"><div class="k">✅ grounded <span class="pill">${meta}</span>
+        <span class="pill">best similarity ${r.bestSimilarity?.toFixed(3)}</span></div>
+        <div class="answer">${esc(r.answer)}</div>`;
+      html += `<h2 style="margin:14px 0 4px">Cited passages — check them yourself</h2>`;
+      for (const c of r.citations) {
+        html += `<div class="cite"><span class="pg">page ${c.page} · passage ${c.passage}</span>
+          ${esc(c.text.replace(/\s+/g,' ').slice(0,420))}</div>`;
+      }
+      if (r.support) {
+        const bad = r.support.verdict === 'some_facts_not_found_in_citations';
+        html += `<pre${bad?' style="color:#dc2626"':''}>fact check: ${esc(r.support.verdict)}` +
+          (r.support.checkedFacts ? ` (${r.support.checkedFacts} checked)` : '') +
+          (r.support.unsupported?.length ? `\nNOT found in citations: ${esc(r.support.unsupported.join(', '))}` : '') +
+          `</pre>`;
+      }
+      html += `</div>`;
+    }
+
+    if (r.retrieved?.length) {
+      html += `<h2>What was retrieved</h2><table>
+        <tr><th>page</th><th>found by</th><th>similarity</th><th>preview</th></tr>` +
+        r.retrieved.map(x=>`<tr><td>${x.page}</td><td>${esc(x.foundBy)}</td>
+          <td>${x.similarity!==null?x.similarity.toFixed(3):'—'}</td>
+          <td>${esc(x.preview)}</td></tr>`).join('') + `</table>`;
+    }
+    $('out').innerHTML = html;
+  } finally { $('ask').disabled = false; }
+};
+
+// ── RETRIEVAL COMPARISON ────────────────────────────────────────────────
+$('search').onclick = async () => {
+  $('sout').innerHTML = '<div class="card"><div class="k">searching…</div></div>';
+  const r = await (await fetch('/v1/search',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({query:$('sq').value, limit:4})})).json();
+
+  const table = (name, rows) => `<h2>${name}</h2>` + (rows.length
+    ? `<table><tr><th>#</th><th>page</th><th>score</th><th>preview</th></tr>` +
+      rows.map((x,i)=>`<tr><td>${i+1}</td><td>${x.page}</td>
+        <td>${x.similarity!=null?x.similarity.toFixed(3):(x.keywordScore!=null?x.keywordScore.toFixed(4):'—')}</td>
+        <td>${esc(x.text.replace(/\s+/g,' ').slice(0,110))}</td></tr>`).join('') + `</table>`
+    : `<p class="note">no results</p>`);
+
+  $('sout').innerHTML =
+    table('Vector only — meaning', r.vector) +
+    table('Keyword only — exact terms', r.keyword) +
+    table('Hybrid (RRF) — fused by rank', r.hybrid);
+};
+
+// ── DOCUMENTS ───────────────────────────────────────────────────────────
+async function loadDocs(){
+  const { documents } = await (await fetch('/v1/documents')).json();
+  $('docs').innerHTML = documents.length
+    ? `<table><tr><th>file</th><th>pages</th><th>chunks</th><th></th></tr>` +
+      documents.map(d=>`<tr><td>${esc(d.filename)}</td><td>${d.page_count}</td>
+        <td>${d.chunk_count}</td>
+        <td><button class="danger" data-id="${d.id}">delete</button></td></tr>`).join('') + `</table>`
+    : '<p class="note">nothing ingested yet</p>';
+
+  $('doc').innerHTML = '<option value="">all documents</option>' +
+    documents.map(d=>`<option value="${d.id}">${esc(d.filename)}</option>`).join('');
+
+  document.querySelectorAll('#docs button.danger').forEach(b=>b.onclick=async()=>{
+    await fetch('/v1/documents/'+b.dataset.id,{method:'DELETE'}); loadDocs();
+  });
+}
+
+const drop = $('drop');
+drop.onclick = ()=> $('file').click();
+drop.ondragover = (e)=>{ e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = ()=> drop.classList.remove('over');
+drop.ondrop = (e)=>{ e.preventDefault(); drop.classList.remove('over'); upload(e.dataTransfer.files[0]); };
+$('file').onchange = (e)=> upload(e.target.files[0]);
+
+async function upload(file){
+  if (!file) return;
+  $('uplog').innerHTML = `<div class="card"><div class="k">ingesting ${esc(file.name)} — this can take a minute for a large PDF</div></div>`;
+  const res = await fetch('/v1/upload?filename='+encodeURIComponent(file.name),
+    { method:'POST', headers:{'Content-Type':'application/pdf'}, body:file });
+  const r = await res.json();
+
+  if (!res.ok) {
+    // The most useful failure: a scanned PDF. Say so plainly instead of "500".
+    $('uplog').innerHTML = `<div class="card warn"><div class="k">✗ could not ingest</div>
+      <div>${esc(r.error)}</div></div>`;
+  } else if (r.skipped) {
+    $('uplog').innerHTML = `<div class="card refused"><div class="k">already ingested</div>
+      <div>Same file contents — skipped to avoid duplicate chunks.</div></div>`;
+  } else {
+    $('uplog').innerHTML = `<div class="card ok"><div class="k">✓ ingested in ${r.seconds}s</div>
+      <pre>${esc((r.log||[]).join('\n'))}</pre></div>`;
+  }
+  loadDocs();
+}
+
+loadDocs();
+</script>
+</body>
+</html>
