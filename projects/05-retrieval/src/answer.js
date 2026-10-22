@@ -169,6 +169,10 @@ export async function answerQuestion({ question, documentId, signal }) {
       answer: parsed.answer || "I can't answer that from this document.",
       reason: 'model_said_insufficient',
       citations: [],
+      // Report the similarity even though the gate didn't act on it. Project 06's
+      // threshold sweep needs it for EVERY case — a case missing this value looks
+      // like similarity 0, which silently corrupts the curve.
+      bestSimilarity: best,
       retrieved: retrieved.map(summarise),
       costUsd: result.cost.usd,
       latencyMs: Date.now() - startedAt,

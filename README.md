@@ -15,7 +15,7 @@ to build the loop yourself, because the mechanism is the lesson.
 | 03  | [`observability`](projects/03-observability)         | OTel traces for LLM calls, token/cost accounting, redaction               | ✅ built |
 | 04  | [`semantic-cache`](projects/04-semantic-cache)       | Redis vector cache, spend-based rate limiting, model routing              | ✅ built |
 | 05  | [`retrieval`](projects/05-retrieval)                 | RAG over your own PDFs — chunking, hybrid search, grounded answers        | ✅ built |
-| 06  | `evals`                                              | Golden datasets, LLM-as-judge, CI quality gate                            | planned |
+| 06  | [`evals`](projects/06-evals)                         | Golden datasets, LLM-as-judge, threshold sweep, CI quality gate           | ✅ built |
 | 07  | `mcp-server`                                         | Model Context Protocol server, real tools, wired into a client            | planned |
 | 08  | `durable-agent`                                      | BullMQ durability, checkpointing, human-in-the-loop, prompt injection     | planned |
 | 09  | `capstone`                                           | Assemble 01–08 into one deployable service                                | planned |
@@ -81,6 +81,25 @@ Fusion), and four layered grounding mechanisms.
 > Also measured: `plainto_tsquery` ANDs every term, so the keyword half of hybrid search
 > returned **zero rows on every natural-language question** — invisible, because the
 > vector half kept returning plausible results.
+
+**06 — Evals.** A golden dataset with known-correct outcomes, scoring **retrieval and
+generation separately**, an LLM judge for groundedness, a threshold sweep, and a CI gate
+whose exit code blocks a merge.
+
+> **The reason this project exists:** project 05 was verified by hand on twenty questions
+> I chose — and the first query the *user* picked found a case where hybrid search was
+> worse than vector search alone. You cannot test your own work by selecting the test
+> cases.
+>
+> **The headline result.** The sweep runs the suite once with the gate disabled, then
+> replays twelve thresholds as arithmetic. Sorting cases by similarity shows
+> `trap-grade12` at **0.806** — a question that must be refused — ranking above **seven**
+> questions that must be answered. *Any gate strict enough to catch it blocks all seven.*
+> No threshold exists; it's structural, not a tuning problem.
+>
+> And yet false accepts stay at **0% at every threshold**, because the **model** catches
+> it where the gate cannot. That's the layered-defence argument from projects 04 and 05,
+> finally measured instead of asserted.
 
 ## Per-project files
 

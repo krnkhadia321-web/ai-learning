@@ -1,0 +1,15 @@
+{
+  "name": "06-evals",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Evals for the RAG system — a golden dataset, retrieval and answer scored separately, an LLM judge, and a CI gate.",
+  "scripts": {
+    "eval": "node --env-file=../../.env src/run.js",
+    "eval:sweep": "node --env-file=../../.env src/sweep.js",
+    "gate": "node --env-file=../../.env src/run.js --gate"
+  },
+  "dependencies": {
+    "zod": "^3.25.76"
+  }
+}

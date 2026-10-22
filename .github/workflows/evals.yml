@@ -1,0 +1,127 @@
+# Run the RAG evals on every push, and FAIL THE BUILD if quality regressed.
+#
+# This file is what turns a report into a gate. Everything in project 06 up to this
+# point measures; this is what makes the measurement block a merge.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY THIS IS HARDER THAN A NORMAL TEST SUITE
+#
+#   1. It needs a DATABASE with the pgvector extension — hence `services` below.
+#   2. It needs DATA. An empty index retrieves nothing and every case fails, so the
+#      document has to be generated and ingested before the evals run.
+#   3. It needs an API KEY, so it cannot run on pull requests from forks (secrets
+#      are not exposed to them — by design, or any stranger could exfiltrate yours).
+#   4. It is NONDETERMINISTIC and costs money. See the notes at the bottom.
+#
+# It deliberately uses the GENERATED sample handbook, never a real document: CI logs
+# are visible to anyone with repo access, and eval output quotes retrieved passages.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: evals
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Manual runs, for when you want to check a threshold change without pushing.
+  workflow_dispatch:
+
+jobs:
+  rag-evals:
+    runs-on: ubuntu-latest
+
+    # Skip on forks: secrets are not available there, so the job would fail for a
+    # reason that has nothing to do with the contributor's change.
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+
+    services:
+      postgres:
+        # The same image the project uses locally — pgvector pre-compiled.
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag
+          POSTGRES_DB: rag
+        ports:
+          - 5433:5432
+        # Without this the job races the database and fails intermittently, which
+        # is the worst kind of CI failure because it trains people to hit re-run.
+        options: >-
+          --health-cmd "pg_isready -U rag -d rag"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      PG_URL: postgresql://rag:rag@localhost:5433/rag
+      # Pace harder than locally. A free-tier token-per-minute limit is shared
+      # across everything using the key, and CI has no human watching it retry.
+      EVAL_PACE_MS: 3000
+      EVAL_MAX_ATTEMPTS: 6
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # Cache the embedding model (~25 MB). Without this every run re-downloads it
+      # from Hugging Face, which is slow and occasionally rate-limited on their end.
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-all-MiniLM-L6-v2-v1
+
+      - name: Generate the sample document
+        working-directory: projects/05-retrieval
+        run: node scripts/make-sample-pdf.js
+
+      - name: Ingest
+        working-directory: projects/05-retrieval
+        run: node src/ingest.js docs/acme-handbook.pdf
+
+      # ── The gate ────────────────────────────────────────────────────────────
+      #
+      # `--gate` makes the exit code reflect the thresholds, so a regression fails
+      # the build. `--no-judge` because the judge roughly doubles cost and adds
+      # nondeterminism; the deterministic checks catch regressions reliably and the
+      # judge is better run on a schedule than on every push.
+      #
+      # Only the handbook is ingested here, so book cases are skipped by tag.
+      - name: Run evals
+        working-directory: projects/06-evals
+        run: node src/run.js --gate --no-judge --tag=grounded
+
+      - name: Run refusal evals
+        working-directory: projects/06-evals
+        run: node src/run.js --gate --no-judge --tag=out-of-scope
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⚠️ THINGS TO KNOW BEFORE TRUSTING A GATE LIKE THIS
+#
+# IT IS NONDETERMINISTIC. Temperature 0 reduces variation but does not remove it.
+# A suite that occasionally fails for no reason is worse than no suite, because
+# people learn to re-run rather than investigate. If a case is flaky, either run it
+# n times and require a majority, or cut it — a flaky case is not a test.
+#
+# IT COSTS MONEY ON EVERY PUSH. Small here, real at scale. Options: run the full
+# suite nightly and a fast subset per push, or only when retrieval code changes
+# (`paths:` filters).
+#
+# THE THRESHOLDS ARE A RATCHET, NOT A TARGET. Set them just below where you are, so
+# a regression fails and an improvement passes. Then tighten them when you improve.
+# Setting them at an aspirational value means a permanently red build that everyone
+# ignores — which is the same as having no gate at all.
+#
+# KNOWN FAILURES ARE EXCLUDED FROM THE PASS COUNT, NOT FROM THE RATES. The report
+# prints both columns. The gate judges the ALL column, because users experience the
+# known failures too.
+# ─────────────────────────────────────────────────────────────────────────────
