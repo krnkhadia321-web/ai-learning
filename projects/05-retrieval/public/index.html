@@ -77,6 +77,7 @@
       you whether <b>retrieval</b> failed or <b>reasoning</b> did — different fixes.</p>
     <div class="row">
       <input type="text" id="sq" value="SEC-0001">
+      <select id="sdoc"><option value="">all documents</option></select>
       <button class="primary" id="search">Compare</button>
     </div>
     <div id="sexamples"></div>
@@ -185,7 +186,7 @@ $('ask').onclick = async () => {
 $('search').onclick = async () => {
   $('sout').innerHTML = '<div class="card"><div class="k">searching…</div></div>';
   const r = await (await fetch('/v1/search',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({query:$('sq').value, limit:4})})).json();
+    body:JSON.stringify({query:$('sq').value, documentId:$('sdoc').value||undefined, limit:4})})).json();
 
   const table = (name, rows) => `<h2>${name}</h2>` + (rows.length
     ? `<table><tr><th>#</th><th>page</th><th>score</th><th>preview</th></tr>` +
@@ -210,8 +211,13 @@ async function loadDocs(){
         <td><button class="danger" data-id="${d.id}">delete</button></td></tr>`).join('') + `</table>`
     : '<p class="note">nothing ingested yet</p>';
 
-  $('doc').innerHTML = '<option value="">all documents</option>' +
+  // Both tabs get the same list. Scoping the Retrieval tab matters more than it
+  // looks: with several documents ingested, chunks from an unrelated one occupy
+  // top-k slots and make the vector/keyword comparison impossible to read.
+  const options = '<option value="">all documents</option>' +
     documents.map(d=>`<option value="${d.id}">${esc(d.filename)}</option>`).join('');
+  $('doc').innerHTML = options;
+  $('sdoc').innerHTML = options;
 
   document.querySelectorAll('#docs button.danger').forEach(b=>b.onclick=async()=>{
     await fetch('/v1/documents/'+b.dataset.id,{method:'DELETE'}); loadDocs();

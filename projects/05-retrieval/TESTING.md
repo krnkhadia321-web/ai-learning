@@ -163,9 +163,16 @@ in this one. Gated at 0.191.
 
 ---
 
-## A4. Hybrid retrieval — each method's blind spot
+## A4. Hybrid retrieval — each method's blind spot, and RRF's own
 
 Switch to the **Retrieval** tab. No model is involved here at all.
+
+> ⚠️ **Select `acme-handbook.pdf` in the dropdown first.** With several documents
+> ingested, chunks from an unrelated one occupy top-k slots and the comparison becomes
+> unreadable. (The dropdown was added after the first run of this test — without it,
+> pages from a 347-page book kept appearing in a 4-page handbook's results.)
+
+### Part 1 — each method's blind spot
 
 **Search `SEC-0001`** (an incident ticket format on page 4):
 
@@ -177,15 +184,48 @@ Hybrid (RRF)    p4 (both)  p4  p1    ← the agreed hit on top
 ```
 
 **Now search *"holiday allowance for senior staff"*** — words that appear **nowhere** in
-the document:
+the handbook:
 
 ```
-Vector only     p2 ...               ← finds "annual leave entitlement" anyway
-Keyword only    (few or none)        ← the words aren't there
+Vector only     p2(0.465)  p3(0.385)  p1(0.335)   ← finds "annual leave" anyway ✅
+Keyword only    p1(0.019)  p3(0.019)  p1(0.015)   ← the words aren't there
 ```
 
 **Proves:** vectors find meaning and miss exact tokens; keywords find exact tokens and
-miss meaning. Neither alone is sufficient, which is the whole argument for hybrid.
+miss meaning.
+
+### ⭐ Part 2 — but now look at what hybrid did to it
+
+```
+Hybrid (RRF)    p3  p1  p1  p2       ← p2 — the CORRECT answer — is now LAST
+```
+
+**Vector search ranked the right page 1st. Hybrid pushed it to 4th.**
+
+Why: "holiday allowance" appears nowhere in the handbook, so keyword search has nothing
+real to match. It returns near-identical weak scores (**0.019, 0.019, 0.015**) — that flat
+distribution is the signature of noise, not of ranking.
+
+But **RRF fuses by rank, and a rank from noise looks exactly like a rank from signal.**
+Page 3 appeared in both lists and collected two contributions; page 2 had only vector's
+confident 0.465 behind it. Agreement won, and agreement was wrong.
+
+```
+   p3:  vector rank 2  +  keyword rank 2   →  1/62 + 1/62  =  0.0323   ← wins
+   p2:  vector rank 1  +  (absent)         →  1/61         =  0.0164   ← correct, loses
+```
+
+> **The property that makes RRF good is the one that breaks it here.** Rewarding
+> agreement is right when both retrievers have something to say. When one has nothing,
+> it still gets an equal vote.
+
+**What you'd do about it in production:** weight the retrievers (RRF supports per-list
+weights), or drop a retriever's contribution entirely when its score distribution is flat
+— a cheap signal that it found nothing. Neither is implemented here; this project uses
+unweighted RRF so the failure is visible rather than hidden.
+
+**The honest summary of A4:** hybrid beats either method alone *on average*, and this is
+a case where it doesn't. That's worth knowing before you ship one.
 
 ---
 
