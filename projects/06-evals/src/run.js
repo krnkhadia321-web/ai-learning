@@ -152,18 +152,25 @@ export async function runEvals({ useJudge = true, filterTag = null, onProgress }
  */
 export function evaluateGate(summary) {
   const checks = [
+    // A null rate means the run contained no case of that kind — so the check could
+    // not run. It passes (you cannot fail what you did not measure) but renders as ➖
+    // rather than ✅, because a vacuous pass that looks like a real one gets believed.
     {
       name: 'false accept rate',
       actual: summary.falseAcceptRate,
       limit: GATE.maxFalseAcceptRate,
-      ok: summary.falseAcceptRate <= GATE.maxFalseAcceptRate,
+      ok: summary.falseAcceptRate === null || summary.falseAcceptRate <= GATE.maxFalseAcceptRate,
+      notMeasured: summary.falseAcceptRate === null,
+      notMeasuredWhy: 'no case in this run expects a refusal',
       why: 'answering when it should refuse risks a confident wrong answer reaching a user',
     },
     {
       name: 'false refusal rate',
       actual: summary.falseRefusalRate,
       limit: GATE.maxFalseRefusalRate,
-      ok: summary.falseRefusalRate <= GATE.maxFalseRefusalRate,
+      ok: summary.falseRefusalRate === null || summary.falseRefusalRate <= GATE.maxFalseRefusalRate,
+      notMeasured: summary.falseRefusalRate === null,
+      notMeasuredWhy: 'no case in this run expects an answer',
       why: 'refusing answerable questions makes the product useless, but is safe',
     },
     // ⚠️ A null metric PASSES, and that is a sharp edge worth understanding.
@@ -179,6 +186,7 @@ export function evaluateGate(summary) {
       limit: GATE.minRecall,
       ok: summary.retrieval.recall === null || summary.retrieval.recall >= GATE.minRecall,
       notMeasured: summary.retrieval.recall === null,
+      notMeasuredWhy: 'no case in this run declares an expected page',
       why: 'the generator cannot use a passage it never received',
       higherIsBetter: true,
     },
@@ -188,10 +196,26 @@ export function evaluateGate(summary) {
       limit: GATE.minMrr,
       ok: summary.retrieval.mrr === null || summary.retrieval.mrr >= GATE.minMrr,
       notMeasured: summary.retrieval.mrr === null,
+      notMeasuredWhy: 'no case in this run declares an expected page',
       why: 'the right passage ranked 4th is worse than ranked 1st, even if recall counts both',
       higherIsBetter: true,
     },
   ];
+
+  // ⚠️ A gate where NOTHING was measured is not a passing gate.
+  //
+  // Each check passes vacuously when its cases were filtered out. Individually that's
+  // correct. But if every check is vacuous, the run verified nothing at all and would
+  // still exit 0 — a CI job that is green because it tested nothing is the most
+  // dangerous state this suite can be in. Fail it.
+  const measured = checks.filter((c) => !c.notMeasured);
+  if (measured.length === 0) {
+    return {
+      passed: false,
+      checks,
+      fatal: 'No gate check could be measured — this run verified nothing. Check your --tag filter.',
+    };
+  }
 
   return { passed: checks.every((c) => c.ok), checks };
 }

@@ -142,13 +142,17 @@ export function renderReport(scores, summary) {
   line(`  GATE — ${summary.gate.passed ? '✅ PASS' : '❌ FAIL'}`);
   line('─'.repeat(78));
   line('');
+  if (summary.gate.fatal) {
+    line(`     ❌ ${summary.gate.fatal}`);
+    line('');
+  }
   for (const c of summary.gate.checks) {
     const cmp = c.higherIsBetter ? '≥' : '≤';
     const shown = c.name.includes('rate') ? pct(c.actual) : num(c.actual);
     const limit = c.name.includes('rate') ? pct(c.limit) : num(c.limit);
     const mark = c.notMeasured ? '➖' : c.ok ? '✅' : '❌';
     line(`     ${mark} ${c.name.padEnd(20)} ${String(shown).padStart(6)}  ${cmp} ${limit}`);
-    if (c.notMeasured) line(`        not measured by this run — no case declares an expected page`);
+    if (c.notMeasured) line(`        NOT MEASURED — ${c.notMeasuredWhy ?? 'nothing in this run exercised it'}`);
     else if (!c.ok) line(`        ${c.why}`);
   }
   line('');

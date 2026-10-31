@@ -206,14 +206,54 @@ node --env-file=../../.env src/run.js --no-judge --tag=out-of-scope
 **Expect** only refusal cases, and in the gate block:
 
 ```
+     ✅ false accept rate        0%  ≤ 0%
+     ➖ false refusal rate        —  ≤ 20%
+        NOT MEASURED — no case in this run expects an answer
      ➖ retrieval recall          —  ≥ 0.800
-        not measured by this run — no case declares an expected page
+        NOT MEASURED — no case in this run declares an expected page
+     ➖ retrieval MRR             —  ≥ 0.600
 ```
 
-**That `➖` matters.** No refusal case declares an expected page, so recall is
-unmeasurable — and a metric you didn't measure passes vacuously. That's correct
-behaviour, but it means **a tag filter can quietly remove a guarantee**, which is why
-it's flagged rather than shown as a green tick.
+Now run the **mirror** of it:
+
+```bash
+node --env-file=../../.env src/run.js --no-judge --tag=grounded
+```
+
+```
+     ➖ false accept rate         —  ≤ 0%
+        NOT MEASURED — no case in this run expects a refusal
+     ✅ false refusal rate       0%  ≤ 20%
+```
+
+**The two runs measure opposite halves**, and each correctly reports the half it
+couldn't see.
+
+> ⚠️ **This was a bug, found during testing of this very project.** The rate metrics
+> originally returned `0` for an empty denominator, so `--tag=grounded` printed
+> `✅ false accept rate 0% ≤ 0%` — a confident green tick for a check that never ran.
+> Someone reading a CI log would conclude hallucination risk had been verified.
+>
+> **A vacuous pass that looks identical to a real one is worse than a failure, because
+> it is believed.** Now it returns `null` and renders `➖`.
+
+### And a filter that matches nothing fails loudly
+
+```bash
+node --env-file=../../.env src/run.js --gate --no-judge --tag=nonexistent-tag
+echo "exit code: $?"
+```
+
+**Expect `❌ FAIL` and exit code 1:**
+
+```
+     ❌ No gate check could be measured — this run verified nothing.
+        Check your --tag filter.
+```
+
+Each check passing vacuously is correct on its own. **All of them passing vacuously
+means the run verified nothing** — and a CI job that's green because it tested nothing
+is the most dangerous state this suite can reach.
 
 Other useful tags: `grounded`, `trap`, `known-failure`, `multihop`, `numeric`.
 

@@ -341,7 +341,7 @@ case is unseparable by any threshold. Compute it; don't make the reader spot it.
 
 ---
 
-## ⭐ What building this suite taught — five real bugs
+## ⭐ What building this suite taught — six real bugs
 
 Every one of these was found by the suite misbehaving, and each is a general lesson.
 
@@ -392,7 +392,36 @@ The report said *"+2 known failures, excluded"* then printed one set of rates th
 Not wrong exactly — which is what made it dangerous. Now both columns are printed with
 an explicit note on which the gate judges.
 
-### 5. `process.exit()` races your cleanup
+### 5. ⭐ A vacuous pass that looks like a real one
+
+Found by running `--tag=grounded`, which selects only answerable cases. The gate printed:
+
+```
+✅ false accept rate   0%  ≤ 0%
+```
+
+There were **no should-refuse cases in that run at all.** The rate was `0 ÷ 0`, and the
+code returned `0` for an empty denominator — so a check that never executed rendered as
+a confident green tick.
+
+Those are two completely different claims:
+
+```
+  0   =  "we checked, and found no false accepts"
+  —   =  "there was nothing to check"
+```
+
+Someone reading a CI log would conclude hallucination risk had been verified. It hadn't.
+
+> **A vacuous pass that looks identical to a real one is worse than a failure, because
+> it is believed.** A failure gets investigated; a false green gets trusted.
+
+Fixed by returning `null` and rendering `➖ NOT MEASURED` with the reason. And the
+logical completion: if **every** check is vacuous, the gate now **fails** — each check
+passing on its own is correct, but all of them passing means the run verified nothing,
+and a green CI job that tested nothing is the worst state this suite can reach.
+
+### 6. `process.exit()` races your cleanup
 
 ```
 Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c

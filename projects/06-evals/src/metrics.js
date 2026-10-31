@@ -247,8 +247,22 @@ function computeRates(scores) {
   return {
     behaviour: counts,
     // ⭐ The two rates that matter, and that trade against each other.
-    falseAcceptRate: shouldRefuse ? counts.false_accept / shouldRefuse : 0,
-    falseRefusalRate: shouldAnswer ? counts.false_refusal / shouldAnswer : 0,
+    //
+    // ⚠️ NULL, NOT ZERO, when there is nothing to measure.
+    //
+    // These returned 0 at first, which is a different claim entirely: "we checked and
+    // found no false accepts" rather than "there was nothing to check". Running
+    // `--gate --tag=grounded` selects only answerable cases, so the should-refuse
+    // column is empty — and the gate printed a confident green tick for a check that
+    // never ran.
+    //
+    // A vacuous pass that looks identical to a real one is worse than a failure,
+    // because it is believed. Null propagates to `notMeasured` and renders as ➖.
+    falseAcceptRate: shouldRefuse ? counts.false_accept / shouldRefuse : null,
+    falseRefusalRate: shouldAnswer ? counts.false_refusal / shouldAnswer : null,
+    // Denominators, so the report can say WHY something wasn't measured.
+    shouldAnswerCount: shouldAnswer,
+    shouldRefuseCount: shouldRefuse,
     retrieval: {
       recall: withRetrieval.length ? withRetrieval.filter((s) => s.retrieval.hit).length / withRetrieval.length : null,
       mrr: avg((s) => s.retrieval.mrr),
