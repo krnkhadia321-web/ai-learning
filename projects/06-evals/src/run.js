@@ -38,6 +38,16 @@ const GATE = {
   // on everything downstream.
   minRecall: Number(process.env.GATE_MIN_RECALL ?? 0.8),
   minMrr: Number(process.env.GATE_MIN_MRR ?? 0.6),
+  // ⭐ Added after a regression slipped through.
+  //
+  // Setting ANSWER_TOP_K=1 cut cost 35% and degraded multi-page retrieval — and the
+  // gate passed, because recall and MRR were unaffected. Every single-page case still
+  // retrieved its page at rank 1, so those two metrics could not see it.
+  //
+  // Only COVERAGE moved (80% → 70%), because a case expecting two pages cannot find
+  // both when only one passage is retrieved. It was computed, printed, and not
+  // enforced — so the one metric that detected the regression had no vote.
+  minCoverage: Number(process.env.GATE_MIN_COVERAGE ?? 0.8),
 };
 
 export async function runEvals({ useJudge = true, filterTag = null, onProgress } = {}) {
@@ -198,6 +208,19 @@ export function evaluateGate(summary) {
       notMeasured: summary.retrieval.mrr === null,
       notMeasuredWhy: 'no case in this run declares an expected page',
       why: 'the right passage ranked 4th is worse than ranked 1st, even if recall counts both',
+      higherIsBetter: true,
+    },
+    {
+      name: 'retrieval coverage',
+      actual: summary.retrieval.coverage,
+      limit: GATE.minCoverage,
+      ok: summary.retrieval.coverage === null || summary.retrieval.coverage >= GATE.minCoverage,
+      notMeasured: summary.retrieval.coverage === null,
+      notMeasuredWhy: 'no case in this run declares an expected page',
+      // The specific thing recall and MRR are blind to: a question whose answer is
+      // spread across several passages, where finding one of three counts as a "hit"
+      // for recall and as rank 1 for MRR.
+      why: 'an answer needing several passages is wrong if only one was retrieved — recall and MRR both score that as a success',
       higherIsBetter: true,
     },
   ];

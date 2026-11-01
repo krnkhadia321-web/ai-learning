@@ -139,27 +139,9 @@ will show the judge's per-claim breakdown alongside.
 
 ---
 
-## A4. Prove the gate blocks a regression ⭐
+## A4. ⭐⭐ Prove the gate blocks a regression — and find its blind spot
 
-The whole point of a gate is that it stops a bad change. So break something.
-
-**Open `projects/05-retrieval/src/answer.js`** and sabotage the top-k:
-
-```js
-const TOP_K = Number(process.env.ANSWER_TOP_K ?? 5);
-                                                 ↑ change to 1
-```
-
-Then:
-
-```bash
-npm run eval --workspace=06-evals -- --no-judge
-```
-
-**Expect** recall to drop as questions whose answer sat at rank 2+ now miss, and the
-gate to fail with a non-zero exit code.
-
-Even better — don't edit the file, just set the env var:
+The whole point of a gate is stopping a bad change. So break something.
 
 ```bash
 cd projects/06-evals
@@ -167,10 +149,70 @@ ANSWER_TOP_K=1 node --env-file=../../.env src/run.js --gate --no-judge
 echo "exit code: $?"
 ```
 
-**Expect a non-zero exit code.** That number is what CI reads; everything else is
-decoration.
+`ANSWER_TOP_K=1` makes project 05 hand the model **one** passage instead of five.
+Nobody does this maliciously — it's the shape of a plausible cost optimisation.
 
-**Restore `ANSWER_TOP_K` afterwards** (or just don't set it).
+**Expect `❌ FAIL`, exit code `1`** — and exactly one check firing:
+
+```
+     ✅ false accept rate        0%  ≤ 0%
+     ✅ false refusal rate      20%  ≤ 20%
+     ✅ retrieval recall      0.800  ≥ 0.800
+     ✅ retrieval MRR         0.800  ≥ 0.600
+     ❌ retrieval coverage    0.700  ≥ 0.800
+```
+
+**Restore it afterwards** (just stop setting the env var).
+
+### ⭐ Why only coverage moves — and why this test exists
+
+The first version of this guide predicted recall would drop. **It doesn't, and A1
+already told us why:**
+
+```
+recall@k   80%
+MRR       0.800      ← identical
+```
+
+Identical values mean **every correct page was already retrieved at rank 1**. If nothing
+was sitting at rank 2, cutting top-k from 5 to 1 cannot lose it. The prediction was
+wrong, and the evidence was two tests earlier.
+
+What *does* break is **coverage**. Three cases declare **two** expected pages
+(`book-not-the-voice` [35, 36], `book-control-song` [35, 34], `multihop-son-suffering`
+[312, 237]). With one passage retrieved, each caps at 50% however good retrieval is.
+
+```
+coverage   80% → 70%        the only metric that moved
+cost       $0.0035 → $0.0023    35% cheaper
+```
+
+You can see it directly in the known-failure output:
+
+```
+retrieved [234]       ← was [234,234,39,9,39]
+```
+
+> **The regression this test exists for:** a change that **saves 35% of cost**,
+> **measurably degrades multi-passage retrieval**, and originally **passed the gate** —
+> because coverage was computed, printed, and then not enforced.
+>
+> Recall counts "found one of three pages" as a hit. MRR scores it as rank 1. Only
+> coverage knows the difference. It was added to the gate *because* this test failed to
+> fail.
+
+### The general lesson
+
+**Every metric has a blind spot, and a gate is only as good as its weakest-covered
+failure mode.**
+
+- **recall** — blind to ranking, and to partial coverage
+- **MRR** — blind to how many were found, only where the first one landed
+- **coverage** — blind to ranking entirely
+- **all three** — blind to whether the answer was any good
+
+That's why the gate checks five things, and why the honest answer to "is our eval
+suite good enough" is always *"it catches the failures we've thought of."*
 
 ---
 

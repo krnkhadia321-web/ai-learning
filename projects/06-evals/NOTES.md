@@ -341,7 +341,7 @@ case is unseparable by any threshold. Compute it; don't make the reader spot it.
 
 ---
 
-## ⭐ What building this suite taught — six real bugs
+## ⭐ What building this suite taught — seven real bugs
 
 Every one of these was found by the suite misbehaving, and each is a general lesson.
 
@@ -421,7 +421,55 @@ logical completion: if **every** check is vacuous, the gate now **fails** — ea
 passing on its own is correct, but all of them passing means the run verified nothing,
 and a green CI job that tested nothing is the worst state this suite can reach.
 
-### 6. `process.exit()` races your cleanup
+### 6. ⭐ A metric you print but don't enforce has no vote
+
+The sabotage test was meant to prove the gate blocks a bad change: set `ANSWER_TOP_K=1`
+so the model gets one passage instead of five, and watch recall collapse.
+
+**Recall didn't move. The gate passed.** And the evidence that it would pass was already
+in the first run:
+
+```
+recall@k   80%
+MRR       0.800      ← identical
+```
+
+Identical values mean every correct page was **already at rank 1**. Nothing was sitting
+at rank 2 to lose. The prediction was wrong, and the data had said so two tests earlier.
+
+**What did break was coverage** — 80% → 70%. Three cases declare two expected pages, and
+one retrieved passage can satisfy at most one of them.
+
+```
+coverage   80% → 70%            the only metric that moved
+cost       $0.0035 → $0.0023    35% cheaper
+```
+
+> So: a change that **saves 35% of cost**, **measurably degrades multi-passage
+> retrieval**, and **passes the gate** — because coverage was computed, printed, and
+> then not enforced.
+
+Fixed by adding coverage to the gate. With it, the same change now fails with exactly
+one red check and the other four still green.
+
+**The general lesson — every metric has a blind spot:**
+
+| Metric | Blind to |
+|---|---|
+| recall@k | ranking, and partial coverage ("found 1 of 3" scores as a hit) |
+| MRR | how many were found — only where the first one landed |
+| coverage | ranking entirely |
+| all three | whether the answer was any good |
+
+A gate is only as strong as its **weakest-covered failure mode**, and the honest answer
+to *"is our eval suite good enough?"* is always **"it catches the failures we've thought
+of."**
+
+> Worth noting how this was found: the test was run by someone who hadn't written it.
+> That's twice now — the same thing happened with hybrid search in project 05. **You
+> cannot find your own blind spots by running your own tests.**
+
+### 7. `process.exit()` races your cleanup
 
 ```
 Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c
